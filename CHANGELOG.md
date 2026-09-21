@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 三类测试基线（特性 002）：`tests/tdd_contracts.rs`（逐公开入口的行为契约，头部
+  `TDD-PROBE` 表登记「入口 / 变异 / 红 / 绿」）、`tests/sdd_spec.rs`（`docs/标准.md`
+  全部 `##` 章节 1:1 对照的可执行断言）、`tests/aidd_boundary.rs`（AI 生成、人工复核
+  后保留的边界用例）。三者全部离线运行，不依赖真实服务。
+- live 真连服用例 `tests/live_taos.rs`（全部 `#[ignore]`，默认不参与 CI；凭据只读
+  `FOUNDATIONX_TAOSX_*`）。双传输各一个独立用例：NativeWs（原生端口 6030 可达性 +
+  WS 握手 + 短会话首帧 + 数据面往返）与 REST（taosAdapter 6041），两者均以唯一化
+  超级表完成建表 → 批量写 → 查询 → 清理并断言无残留 → close。
+
 ## [0.1.0] - 2026-09-21
 
 ### 新增
