@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
 //! 不可达地址的失败路径：`ping` / `connect` / 原生 WS 必须返回 `Err`，`health_check` 给出未就绪信封。
 
 use std::time::Duration;
