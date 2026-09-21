@@ -29,17 +29,15 @@ struct RawResponse {
 
 /// 解析 TDengine REST JSON 响应。
 pub(super) fn parse_taos_json(text: &str) -> TaosResult<TaosExecResult> {
-    let raw: RawResponse = serde_json::from_str(text).map_err(|error| {
-        TaosError::Serialization(format!(
-            "TDengine JSON 解析失败（{error}）; body={}",
-            truncate(text, 256)
-        ))
-    })?;
+    // 解析失败只报告 serde 的位置信息：响应正文可能夹带凭据或 SQL 片段，不入消息。
+    let raw: RawResponse = serde_json::from_str(text)
+        .map_err(|error| TaosError::Serialization(format!("TDengine JSON 解析失败（{error}）")))?;
 
     if raw.code != 0 {
+        // 只保留服务端结构化 `desc`（截断至 256 字符）；原始响应正文不入消息。
         return Err(TaosError::from_taos_code(
             raw.code,
-            &raw.desc.unwrap_or_default(),
+            &truncate(&raw.desc.unwrap_or_default(), 256),
         ));
     }
 

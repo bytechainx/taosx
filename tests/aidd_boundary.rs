@@ -15,11 +15,17 @@
 //! // AIDD: 硬上限取等与越界 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §3 构建期 clamp 到 HARD_MAX_* | 结论=保留
 //! // AIDD: TDengine 错误码 896 / 0x2603 / 9826 / 0 / -1 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §3 重试仅针对瞬时错误 | 结论=保留
 //! // AIDD: 库名标识符 192/193 字节边界 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §2 标识符白名单含限长（库名 / 超级表名） | 结论=保留
+//! // AIDD: 非 2xx 响应体夹带凭据 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §4 错误消息不回显凭据 | 结论=保留
+//! // AIDD: 2xx 但正文非法 JSON 且夹带凭据 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §4 错误消息不回显凭据 | 结论=保留
+
+use std::time::Duration;
 
 use taosx::{
     build_insert_sql_chunks, TaosConfig, TaosError, TaosPoint, TaosPool, TsPrecision,
     HARD_MAX_BATCH_ROWS, HARD_MAX_CLOSE_TIMEOUT,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// 边界：超级表名恰好 94 字节放行、95 字节拒绝（限长为下界闭、上界闭）。
 #[test]
@@ -197,4 +203,77 @@ fn taos_error_code_boundaries() {
         TaosError::from_taos_code(i32::MAX, "语法错误"),
         TaosError::Invalid(_)
     ));
+}
+
+/// 本地一次性 HTTP 桩：按给定状态码与正文应答一次。
+async fn spawn_http_mock(status: u16, reason: &'static str, body: &'static str) -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("绑定临时端口");
+    let port = listener.local_addr().expect("读取临时端口").port();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    port
+}
+
+/// 指向本地桩、跳过建库与精度探测的池。
+fn offline_pool(port: u16) -> TaosPool {
+    TaosPool::new(TaosConfig {
+        port,
+        database: String::new(),
+        timeout: Duration::from_secs(2),
+        acquire_timeout: Duration::from_secs(2),
+        ..TaosConfig::default()
+    })
+    .expect("离线构造池")
+}
+
+/// 边界：远端响应正文夹带凭据 / SQL 时，错误消息一律不得回显正文（标准 §4）。
+#[tokio::test]
+async fn error_messages_never_echo_response_body() {
+    const LEAKED: &str = "password=s3cr3t-from-server; SELECT secret_col FROM t";
+
+    // (1) 非 2xx：分类由 HTTP 状态决定，正文只作诊断来源，绝不进消息。
+    let port = spawn_http_mock(400, "Bad Request", LEAKED).await;
+    let error = offline_pool(port)
+        .exec("SELECT 1")
+        .await
+        .expect_err("非 2xx 必须失败");
+    let message = error.to_string();
+    assert!(
+        !message.contains("s3cr3t-from-server"),
+        "错误不得回显响应正文中的凭据: {message}"
+    );
+    assert!(
+        !message.contains("secret_col") && !message.contains("SELECT"),
+        "错误不得回显响应正文 / SQL 片段: {message}"
+    );
+    assert!(!error.is_retryable());
+
+    // (2) 2xx 但正文非法 JSON：解析失败同样不得回显正文。
+    let port = spawn_http_mock(200, "OK", "not-json password=s3cr3t-from-server").await;
+    let error = offline_pool(port)
+        .exec("SELECT 1")
+        .await
+        .expect_err("非法 JSON 必须失败");
+    assert!(matches!(error, TaosError::Serialization(_)), "{error:?}");
+    let message = error.to_string();
+    assert!(
+        !message.contains("s3cr3t-from-server"),
+        "错误不得回显响应正文中的凭据: {message}"
+    );
+    assert!(
+        !message.contains("not-json"),
+        "错误不得回显响应正文: {message}"
+    );
 }
