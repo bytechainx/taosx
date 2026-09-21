@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::error::{TaosError, TaosResult};
 
-use super::{TransportMode, TsPrecision};
+use super::{TransportMode, TsPrecision, MAX_IDENT_BYTES};
 
 /// TOML 中毫秒字段（`timeout_ms` 等）的解析器。
 pub(super) fn de_millis<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -128,8 +128,11 @@ pub(super) fn valid_host(host: &str) -> bool {
         .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
 }
 
-/// SQL 标识符校验（字母或下划线开头，仅含字母数字与下划线）。
+/// SQL 标识符校验（字母或下划线开头，仅含字母数字与下划线，且限长）。
 pub(super) fn valid_ident(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_IDENT_BYTES {
+        return false;
+    }
     let mut characters = value.chars();
     characters
         .next()

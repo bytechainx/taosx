@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::config::{TsPrecision, HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS};
+use crate::config::{TsPrecision, HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS, MAX_IDENT_BYTES};
 use crate::error::{TaosError, TaosResult};
 use crate::point::TaosPoint;
 
@@ -157,7 +157,7 @@ pub(super) fn validate_stable_ident(name: &str) -> TaosResult<()> {
 
 /// SQL 标识符白名单校验（防注入）。
 pub(super) fn validate_ident(name: &str) -> TaosResult<()> {
-    if name.is_empty() || name.len() > 192 {
+    if name.is_empty() || name.len() > MAX_IDENT_BYTES {
         return Err(TaosError::Invalid("非法标识符长度".to_owned()));
     }
     let mut characters = name.chars();

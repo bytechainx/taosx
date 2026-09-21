@@ -87,6 +87,10 @@ pub const HARD_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 pub const HARD_MAX_QUERY_ROWS: usize = 100_000;
 /// 关闭排空允许配置的最长时间。
 pub const HARD_MAX_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// SQL 标识符（库名 / 子表名）允许的最大 UTF-8 字节数。
+///
+/// 库名校验与 `client` 模块的标识符校验共用同一上界，避免两处校验逻辑漂移。
+pub(crate) const MAX_IDENT_BYTES: usize = 192;
 
 /// 时间戳精度（库级；`TaosPoint::timestamp_ns` 始终为纳秒，写入前按精度换算）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
