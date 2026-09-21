@@ -7,7 +7,7 @@ description = "Async TDengine client over REST and native WebSocket with pooling
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bytechainx/taosx"
 homepage = "https://github.com/bytechainx/taosx"
-documentation = "https://docs.rs/taosx"
+documentation = "https://github.com/bytechainx/taosx#readme"
 readme = "README.md"
 keywords = ["tdengine", "taos", "time-series", "database", "async"]
 categories = ["database", "asynchronous"]
@@ -30,7 +30,3 @@ url = "2"
 [dev-dependencies]
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

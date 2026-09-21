@@ -5,14 +5,17 @@ TDengine（涛思）异步客户端。REST 为主传输，原生 WebSocket 为�
 
 - 默认传输：HTTP REST `POST http(s)://host:port/rest/sql[/database]`（端口 6041，Basic 认证）
 - 补充传输：原生 WebSocket `ws(s)://host:port/rest/ws`（握手探测 + 短会话 SQL）
-- 零内部耦合：只依赖 crates.io 公开 crate，可独立 `cargo publish`
+- 零内部耦合：只依赖 crates.io 公开 crate，不依赖任何内部框架
 - 硬上限 fail-closed：并发、批量行数/字节、响应体、查询行数、关闭 deadline 全部有上限常量
 - 写路径安全：标识符白名单校验 + tag 值十六进制子表编码 + 字面量转义
 
 ## 安装
 
-```bash
-cargo add taosx
+本 crate **不发布到 crates.io**，通过 git 依赖引入：
+
+```toml
+[dependencies]
+taosx = { git = "https://github.com/bytechainx/taosx" }
 ```
 
 ## 最小可运行示例
