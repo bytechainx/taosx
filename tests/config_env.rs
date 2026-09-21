@@ -291,7 +291,6 @@ max_response_bytes = 1048576
 max_query_rows = 512
 hosts = ["127.0.0.2", "127.0.0.3"]
 write_max_attempts = 3
-max_subtables_hint = 64
 "#,
     )
     .expect("TOML 解析必须成功");
@@ -308,7 +307,6 @@ max_subtables_hint = 64
     assert_eq!(config.max_query_rows, 512);
     assert_eq!(config.hosts.len(), 2);
     assert_eq!(config.write_max_attempts, 3);
-    assert_eq!(config.max_subtables_hint, 64);
     assert_eq!(config.endpoint_hosts().len(), 3);
     assert!(config.password.is_empty());
 
@@ -403,13 +401,11 @@ fn builder_covers_every_tunable_and_validates() {
         .close_timeout(Duration::from_millis(100))
         .hosts(["127.0.0.5"])
         .write_max_attempts(0)
-        .max_subtables_hint(7)
         .build()
         .expect("构建必须成功");
     assert_eq!(config.precision, Some(TsPrecision::Us));
     assert_eq!(config.max_query_rows, 50);
     assert_eq!(config.hosts, vec!["127.0.0.5".to_owned()]);
-    assert_eq!(config.max_subtables_hint, 7);
     assert_eq!(config.write_max_attempts, 1, "0 应被夹到 1");
 
     let error = TaosConfig::builder()

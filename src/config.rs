@@ -59,9 +59,6 @@ pub const ENV_CLOSE_TIMEOUT_MS: &str = "FOUNDATIONX_TAOSX_CLOSE_TIMEOUT_MS";
 pub const ENV_HOSTS: &str = "FOUNDATIONX_TAOSX_HOSTS";
 /// 环境变量：幂等写默认最大重试次数（含首次）。
 pub const ENV_WRITE_MAX_ATTEMPTS: &str = "FOUNDATIONX_TAOSX_WRITE_MAX_ATTEMPTS";
-/// 环境变量：每个逻辑 stable 允许的子表基数提示（`0` = 不限制）。
-pub const ENV_MAX_SUBTABLES_HINT: &str = "FOUNDATIONX_TAOSX_MAX_SUBTABLES_HINT";
-
 /// 默认主机。
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 /// 默认 REST / WS 端口。
@@ -227,8 +224,6 @@ pub struct TaosConfig {
     pub hosts: Vec<String>,
     /// 幂等写默认最大重试次数（含首次；1 = 不重试）。
     pub write_max_attempts: u32,
-    /// 每个逻辑 stable 允许的最大子表基数提示（超过记 metrics/拒绝；0 = 不限制）。
-    pub max_subtables_hint: usize,
 }
 
 impl Default for TaosConfig {
@@ -253,7 +248,6 @@ impl Default for TaosConfig {
             close_timeout: Duration::from_secs(5),
             hosts: Vec::new(),
             write_max_attempts: 1,
-            max_subtables_hint: 0,
         }
     }
 }
@@ -281,7 +275,6 @@ impl fmt::Debug for TaosConfig {
             .field("close_timeout", &self.close_timeout)
             .field("hosts", &self.hosts)
             .field("write_max_attempts", &self.write_max_attempts)
-            .field("max_subtables_hint", &self.max_subtables_hint)
             .finish()
     }
 }
@@ -553,9 +546,6 @@ impl TaosConfig {
         if let Some(value) = env_parsed::<u32>(ENV_WRITE_MAX_ATTEMPTS)? {
             self.write_max_attempts = value.max(1);
         }
-        if let Some(value) = env_parsed::<usize>(ENV_MAX_SUBTABLES_HINT)? {
-            self.max_subtables_hint = value;
-        }
         Ok(())
     }
 }
@@ -723,13 +713,6 @@ impl TaosConfigBuilder {
     #[must_use]
     pub fn write_max_attempts(mut self, attempts: u32) -> Self {
         self.inner.write_max_attempts = attempts.max(1);
-        self
-    }
-
-    /// 设置每个 stable 的子表基数提示。
-    #[must_use]
-    pub fn max_subtables_hint(mut self, hint: usize) -> Self {
-        self.inner.max_subtables_hint = hint;
         self
     }
 

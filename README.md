@@ -140,7 +140,6 @@ INSERT 的入口：
 | `close_timeout` | `close_timeout_ms` / `FOUNDATIONX_TAOSX_CLOSE_TIMEOUT_MS` | `5s` | 关闭排空 deadline，≤ `30s` |
 | `hosts` | `hosts` / `FOUNDATIONX_TAOSX_HOSTS` | `[]` | 备用主机，逗号分隔；主 host 失败后按序故障转移 |
 | `write_max_attempts` | `write_max_attempts` / `FOUNDATIONX_TAOSX_WRITE_MAX_ATTEMPTS` | `1` | 幂等写重试次数（含首次），≥ 1 |
-| `max_subtables_hint` | `max_subtables_hint` / `FOUNDATIONX_TAOSX_MAX_SUBTABLES_HINT` | `0` | 子表基数提示，`0` = 不限制 |
 
 TOML 形态（`schema_version` 必填，未知字段拒绝）：
 
