@@ -1,7 +1,8 @@
 //! 配置解析辅助：TOML 字段反序列化、环境变量读取、主机与标识符校验。
 //!
-//! 自 `config.rs` 拆出；这些函数只服务于 [`crate::config::TaosConfig`] 与
-//! [`crate::config::TaosConfigBuilder`] 的构造与校验，不构成独立公共面。
+//! 自 `config.rs` 拆出（生产段超 800 行的拆分）；只服务于
+//! [`crate::config::TaosConfig`] 与 [`crate::config::TaosConfigBuilder`] 的构造与校验，
+//! 不构成独立公共面。门面对应项以 `use self::parse::…` 引用。
 
 use std::time::Duration;
 

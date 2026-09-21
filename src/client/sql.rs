@@ -1,6 +1,7 @@
 //! SQL 构造与安全校验。
 //!
-//! 自 `client.rs` 拆出；`build_insert_sql_chunks` 仍由 `client.rs` 以 `pub use` 重导出。
+//! 自 `client.rs` 拆出（生产段超 800 行的拆分）；`build_insert_sql_chunks` 仍由门面
+//! 以 `pub use` 重导出，外部路径不变。
 
 use std::fmt::Write as _;
 

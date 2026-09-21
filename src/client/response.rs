@@ -1,6 +1,7 @@
 //! TDengine REST 响应解析与限额读取。
 //!
-//! 自 `client.rs` 拆出；`RawResponse` 是响应结构的私有镜像，不进入公共面。
+//! 自 `client.rs` 拆出（生产段超 800 行的拆分）；`RawResponse` 是响应结构的私有镜像，
+//! 不进入公共面。
 
 use std::str::FromStr;
 

@@ -1,6 +1,6 @@
 //! TDengine 客户端的公共数据类型。
 //!
-//! 自 `client.rs` 拆出；公共路径由 `client.rs` 的 `pub use` 保持不变。
+//! 自 `client.rs` 拆出（生产段超 800 行的拆分）；公共路径由门面的 `pub use` 保持不变。
 
 use crate::config::TsPrecision;
 use crate::error::TaosError;

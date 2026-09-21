@@ -1,6 +1,7 @@
 //! `TaosPool` 的批量写入与区间查询方法组。
 //!
-//! 自 `client.rs` 拆出；`impl TaosPool` 按职责分块，公共 API 与路径均不变。
+//! 自 `client.rs` 拆出（生产段超 800 行的拆分）；`impl TaosPool` 按职责分块，
+//! 公共 API 与路径均不变。
 
 use crate::error::{TaosError, TaosResult};
 use crate::point::TaosPoint;
