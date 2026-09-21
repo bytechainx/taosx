@@ -8,6 +8,22 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-22
+
+### 修正
+
+- **错误消息不再携带原始响应正文**（`docs/标准.md` §4「错误消息与 `Debug` 输出不回显
+  密码」，`src/error.rs` 亦约定「响应正文与凭据一律不入消息」）。修复前，非 2xx 响应与
+  「2xx 但正文非法 JSON」都会把正文截断后拼进错误消息（`taos HTTP 400: <正文>` /
+  `TDengine JSON 解析失败（…）; body=<正文>`）：一旦远端或中间代理在正文里回显凭据 / DSN，
+  错误消息连同日志会一起泄漏。现改为非 2xx 只保留 HTTP 状态码 + `响应正文已省略`，
+  非法 JSON 只保留 serde 的位置信息。服务端结构化 `desc` 仍保留（诊断必需），并补上
+  256 字符截断，避免服务端可控文本无界进入消息。公开签名未变，属实现向契约靠拢的行为收紧。
+- 新增对抗用例 `error_messages_never_echo_response_body`（`tests/aidd_boundary.rs`）：
+  以本地一次性 HTTP 桩回放「正文夹带凭据」的 400 与非 JSON 200 两种响应，断言错误消息
+  不含凭据、SQL 片段与正文。先红后绿证据见 PR 描述（修复前实测消息为
+  `远端返回错误(code=0): taos HTTP 400: password=s3cr3t-from-server; SELECT secret_col FROM t`）。
+
 ## [0.1.1] - 2026-09-22
 
 ### 新增

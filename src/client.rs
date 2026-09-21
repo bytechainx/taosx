@@ -37,7 +37,7 @@ pub use types::{
     BatchWritePartialError, BatchWriteReport, TaosExecResult, TaosHealth, TaosPoolStats,
 };
 
-use self::response::{parse_taos_json, read_response_limited, truncate, validate_decimal_schema};
+use self::response::{parse_taos_json, read_response_limited, validate_decimal_schema};
 use self::sql::{validate_ident, validate_stable_ident};
 
 /// 关闭标记位（`state` 最高位）。
@@ -507,9 +507,10 @@ impl TaosPool {
         self.inner.metrics.add_response_bytes(text.len());
 
         if !status.is_success() {
+            // 响应正文可能夹带凭据或 SQL 片段，一律不入错误消息（见 src/error.rs 的约定）。
             return Err(TaosError::from_http_status(
                 status.as_u16(),
-                &truncate(&text, 256),
+                "响应正文已省略",
             ));
         }
 
@@ -534,7 +535,7 @@ impl TaosPool {
 
 #[cfg(test)]
 mod tests {
-    use super::response::parse_ts_cell;
+    use super::response::{parse_ts_cell, truncate};
     use super::sql::{
         build_insert_sql_chunks_with_limits, encode_timestamp, subtable_name, MAX_SYMBOL_BYTES,
     };
