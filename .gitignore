@@ -1,0 +1,6 @@
+# 构建产物
+/target
+# 库 crate 不锁定依赖版本（由下游决定）
+Cargo.lock
+# graft 代码图谱缓存（可再生）
+/graft/
