@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
 //! 配置校验（硬上限 / 非法精度 / 非法标识符）+ 环境变量 + 密码脱敏。
 
 use std::time::Duration;

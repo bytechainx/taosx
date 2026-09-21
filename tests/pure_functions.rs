@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
 //! 纯函数行为：SQL 分块与转义、URL 构造、模式校验、重试退避计算。
 
 use std::time::Duration;

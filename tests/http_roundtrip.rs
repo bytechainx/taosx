@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable
+)]
 //! REST 往返：用本地 TCP mock 驱动 `connect` → 建表 → 批量写 → 查询 → 批处理器 全链路。
 //!
 //! mock 只回放预设的 TDengine JSON 响应，并记录每条请求行，用于校验端点与认证契约。
