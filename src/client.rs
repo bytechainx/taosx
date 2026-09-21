@@ -1129,7 +1129,7 @@ fn validate_stable_ident(name: &str) -> TaosResult<()> {
 
 /// SQL 标识符白名单校验（防注入）。
 fn validate_ident(name: &str) -> TaosResult<()> {
-    if name.is_empty() || name.len() > 192 {
+    if name.is_empty() || name.len() > crate::config::MAX_IDENT_BYTES {
         return Err(TaosError::Invalid("非法标识符长度".to_owned()));
     }
     let mut characters = name.chars();

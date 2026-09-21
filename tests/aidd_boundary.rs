@@ -14,6 +14,7 @@
 //! // AIDD: 未对齐时间戳与饱和运算 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §2 禁止浮点与静默精度损失 | 结论=保留
 //! // AIDD: 硬上限取等与越界 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §3 构建期 clamp 到 HARD_MAX_* | 结论=保留
 //! // AIDD: TDengine 错误码 896 / 0x2603 / 9826 / 0 / -1 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §3 重试仅针对瞬时错误 | 结论=保留
+//! // AIDD: 库名标识符 192/193 字节边界 | 来源=AI | 复核=ZoneCNH/2026-09-22 | 依据=标准.md §2 标识符白名单含限长（库名 / 超级表名） | 结论=保留
 
 use taosx::{
     build_insert_sql_chunks, TaosConfig, TaosError, TaosPoint, TaosPool, TsPrecision,
@@ -140,6 +141,33 @@ fn hard_limit_boundaries() {
         ..TaosConfig::default()
     })
     .is_err());
+}
+
+/// 边界：库名标识符恰好 192 字节放行、193 字节拒绝（与子表名共用同一限长）。
+#[test]
+fn database_ident_length_boundary() {
+    let at_limit = TaosConfig {
+        database: "d".repeat(192),
+        ..TaosConfig::default()
+    };
+    at_limit.validate().expect("192 字节库名应通过白名单");
+
+    let over_limit = TaosConfig {
+        database: "d".repeat(193),
+        ..TaosConfig::default()
+    };
+    let error = over_limit
+        .validate()
+        .expect_err("193 字节库名必须 fail-closed 拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
+
+    // 空库名表示「不指定库」，仍应放行（走无库路径的 REST 端点）。
+    TaosConfig {
+        database: String::new(),
+        ..TaosConfig::default()
+    }
+    .validate()
+    .expect("空库名表示未指定，必须放行");
 }
 
 /// 边界：TDengine 错误码分类的极值与非正数输入。
