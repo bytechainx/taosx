@@ -13,6 +13,15 @@ use crate::config::{TaosConfig, TransportMode};
 use crate::error::{TaosError, TaosResult};
 
 /// 构建原生 WS URL（委托配置的 `native_ws_url`，纯函数）。
+///
+/// # Examples
+///
+/// ```
+/// use taosx::{build_native_ws_url, TaosConfig};
+///
+/// let config = TaosConfig::default();
+/// assert_eq!(build_native_ws_url(&config), "ws://127.0.0.1:6041/rest/ws");
+/// ```
 #[must_use]
 pub fn build_native_ws_url(config: &TaosConfig) -> String {
     config.native_ws_url()
