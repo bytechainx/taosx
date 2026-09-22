@@ -13,6 +13,9 @@ use crate::error::{TaosError, TaosResult};
 use super::{TransportMode, TsPrecision, MAX_IDENT_BYTES};
 
 /// TOML 中毫秒字段（`timeout_ms` 等）的解析器。
+///
+/// 注意：`u64::MAX` 毫秒等极端取值会饱和为 [`Duration::MAX`]，
+/// 由 `validate` 的 [`crate::config::HARD_MAX_TIMEOUT`] 上界校验兜底 fail-fast。
 pub(super) fn de_millis<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
     D: serde::Deserializer<'de>,

@@ -93,6 +93,13 @@ pub const HARD_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 pub const HARD_MAX_QUERY_ROWS: usize = 100_000;
 /// 关闭排空允许配置的最长时间。
 pub const HARD_MAX_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 请求超时（`timeout` / `acquire_timeout`）允许配置的最长时间。
+///
+/// 毫秒字段解析（`de_millis`）对 `u64::MAX` 等极端取值会饱和为
+/// [`Duration::MAX`]，本上限在 [`TaosConfig::validate`] 中兜底 fail-fast。
+pub const HARD_MAX_TIMEOUT: Duration = Duration::from_secs(3_600);
+/// 幂等写允许配置的最大重试次数（含首次）。
+pub const HARD_MAX_WRITE_MAX_ATTEMPTS: u32 = 10;
 /// SQL 标识符（库名 / 子表名）允许的最大 UTF-8 字节数。
 ///
 /// 库名校验与 `client` 模块的标识符校验共用同一上界，避免两处校验逻辑漂移。
@@ -319,6 +326,18 @@ impl TaosConfig {
             return Err(TaosError::Config(format!(
                 "close_timeout 超过上限 {:.0?}（当前 {:.0?}）",
                 HARD_MAX_CLOSE_TIMEOUT, self.close_timeout
+            )));
+        }
+        if self.timeout > HARD_MAX_TIMEOUT {
+            return Err(TaosError::Config(format!(
+                "timeout 超过上限 {:.0?}（当前 {:.0?}）",
+                HARD_MAX_TIMEOUT, self.timeout
+            )));
+        }
+        if self.acquire_timeout > HARD_MAX_TIMEOUT {
+            return Err(TaosError::Config(format!(
+                "acquire_timeout 超过上限 {:.0?}（当前 {:.0?}）",
+                HARD_MAX_TIMEOUT, self.acquire_timeout
             )));
         }
         if !valid_host(&self.host) || self.port == 0 {
@@ -759,5 +778,50 @@ write_max_attempts = 3
             msg.contains(&HARD_MAX_CLOSE_TIMEOUT.as_secs().to_string()),
             "错误消息必须引用 HARD_MAX_CLOSE_TIMEOUT 实际值而非硬编码: {msg}"
         );
+    }
+
+    /// P2-1: timeout / acquire_timeout 超过 HARD_MAX_TIMEOUT 必须 fail-fast，
+    /// 错误消息模式对齐 close_timeout 分支（含字段名、上限与实际值）。
+    #[test]
+    fn timeout_over_hard_max_reports_upper_bound() {
+        let over_timeout = TaosConfig {
+            timeout: HARD_MAX_TIMEOUT + Duration::from_millis(1),
+            ..Default::default()
+        };
+        let error = over_timeout.validate().expect_err("超限 timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("timeout 超过上限"),
+            "错误消息必须包含「timeout 超过上限」: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{:.0?}", HARD_MAX_TIMEOUT)),
+            "错误消息必须引用 HARD_MAX_TIMEOUT 实际值: {msg}"
+        );
+
+        let over_acquire = TaosConfig {
+            acquire_timeout: HARD_MAX_TIMEOUT + Duration::from_millis(1),
+            ..Default::default()
+        };
+        let error = over_acquire
+            .validate()
+            .expect_err("超限 acquire_timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("acquire_timeout 超过上限"),
+            "错误消息必须包含「acquire_timeout 超过上限」: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{:.0?}", HARD_MAX_TIMEOUT)),
+            "错误消息必须引用 HARD_MAX_TIMEOUT 实际值: {msg}"
+        );
+
+        // 恰好等于上限必须放行（边界不误伤）。
+        let at_limit = TaosConfig {
+            timeout: HARD_MAX_TIMEOUT,
+            acquire_timeout: HARD_MAX_TIMEOUT,
+            ..Default::default()
+        };
+        at_limit.validate().expect("等于上限必须通过");
     }
 }
