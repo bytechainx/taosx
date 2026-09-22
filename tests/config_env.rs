@@ -182,17 +182,18 @@ fn remote_requires_tls_and_password() {
         host: "td.internal".to_owned(),
         ..TaosConfig::default()
     };
-    assert!(remote.validate().is_err(), "远程明文必须拒绝");
+    let error = remote.validate().expect_err("远程明文必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     let tls_without_password = TaosConfig {
         host: "td.internal".to_owned(),
         tls: true,
         ..TaosConfig::default()
     };
-    assert!(
-        tls_without_password.validate().is_err(),
-        "远程无密码必须拒绝"
-    );
+    let error = tls_without_password
+        .validate()
+        .expect_err("远程无密码必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     let blank_password = TaosConfig {
         host: "td.internal".to_owned(),
@@ -200,7 +201,8 @@ fn remote_requires_tls_and_password() {
         password: "   ".to_owned(),
         ..TaosConfig::default()
     };
-    assert!(blank_password.validate().is_err(), "空白密码必须拒绝");
+    let error = blank_password.validate().expect_err("空白密码必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     let secure = TaosConfig {
         host: "td.internal".to_owned(),
@@ -316,11 +318,13 @@ write_max_attempts = 3
     assert_eq!(config.endpoint_hosts().len(), 3);
     assert!(config.password.is_empty());
 
-    assert!(TaosConfig::from_toml("schema_version = 1\nsink_id = \"x\"\n").is_err());
-    assert!(
-        TaosConfig::from_toml("host = \"127.0.0.1\"\n").is_err(),
-        "缺少 schema_version"
-    );
+    let error = TaosConfig::from_toml("schema_version = 1\nsink_id = \"x\"\n")
+        .expect_err("未知字段必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
+    let error =
+        TaosConfig::from_toml("host = \"127.0.0.1\"\n").expect_err("缺少 schema_version 必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
+    assert!(error.to_string().contains("schema_version"), "{error}");
 }
 
 /// 环境变量用例集中在**一个** `#[test]` 中：`std::env` 是进程级共享状态，

@@ -99,10 +99,10 @@ fn tag_hex_encoding_is_collision_resistant() {
 #[test]
 fn timestamp_alignment_and_saturation() {
     let unaligned = TaosPoint::new("A", 1_500, "0", "0");
-    assert!(
-        build_insert_sql_chunks("ticks", &[unaligned], TsPrecision::Us, 1).is_err(),
-        "1500 ns 无法无损表示为 us，必须拒绝"
-    );
+    let error = build_insert_sql_chunks("ticks", &[unaligned], TsPrecision::Us, 1)
+        .expect_err("1500 ns 无法无损表示为 us，必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    assert!(error.to_string().contains("精度"), "{error}");
 
     let aligned = TaosPoint::new("A", 1_500_000, "0", "0");
     let sql = build_insert_sql_chunks("ticks", &[aligned], TsPrecision::Us, 1)
@@ -128,25 +128,24 @@ fn hard_limit_boundaries() {
         close_timeout: HARD_MAX_CLOSE_TIMEOUT + std::time::Duration::from_millis(1),
         ..TaosConfig::default()
     };
-    assert!(over.validate().is_err(), "超过硬上限必须拒绝");
+    let error = over.validate().expect_err("超过硬上限必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     let points = [TaosPoint::new("A", 1, "0", "0")];
-    assert!(
-        build_insert_sql_chunks("ticks", &points, TsPrecision::Ns, HARD_MAX_BATCH_ROWS + 1)
-            .is_err(),
-        "max_rows 越界必须拒绝"
-    );
-    assert!(
-        build_insert_sql_chunks("ticks", &points, TsPrecision::Ns, 0).is_err(),
-        "max_rows = 0 必须拒绝"
-    );
+    let error = build_insert_sql_chunks("ticks", &points, TsPrecision::Ns, HARD_MAX_BATCH_ROWS + 1)
+        .expect_err("max_rows 越界必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    let error = build_insert_sql_chunks("ticks", &points, TsPrecision::Ns, 0)
+        .expect_err("max_rows = 0 必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
 
     // 离线背压池在越界配置下同样 fail-closed。
-    assert!(TaosPool::new(TaosConfig {
+    let error = TaosPool::new(TaosConfig {
         max_in_flight: 0,
         ..TaosConfig::default()
     })
-    .is_err());
+    .expect_err("max_in_flight = 0 必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 }
 
 /// 边界：库名标识符恰好 192 字节放行、193 字节拒绝（与子表名共用同一限长）。

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use taosx::{
     build_insert_sql_chunks, build_native_ws_url, validate_mode, RetryPolicy, TaosConfig,
-    TaosPoint, TransportMode, TsPrecision,
+    TaosError, TaosPoint, TransportMode, TsPrecision,
 };
 
 fn point(tag: &str, timestamp_ns: i64) -> TaosPoint {
@@ -65,9 +65,19 @@ fn insert_sql_chunks_partition_by_rows() {
     assert!(build_insert_sql_chunks("ticks", &[], TsPrecision::Ms, 10)
         .expect("空输入")
         .is_empty());
-    assert!(build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 0).is_err());
-    assert!(build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 10_001).is_err());
-    assert!(build_insert_sql_chunks("bad table", &points, TsPrecision::Ms, 1).is_err());
+    let error = build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 0)
+        .expect_err("max_rows = 0 必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    let error = build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 10_001)
+        .expect_err("max_rows 越界必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    let error = build_insert_sql_chunks("bad table", &points, TsPrecision::Ms, 1)
+        .expect_err("非法表名必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    assert!(
+        !error.to_string().contains("bad table"),
+        "错误不得回显非法标识符: {error}"
+    );
 }
 
 #[test]
@@ -108,7 +118,9 @@ fn insert_sql_rejects_unaligned_or_oversized_input() {
 
     // tag 值超过 48 字节被拒绝。
     let oversized_tag = point(&"X".repeat(49), 1);
-    assert!(build_insert_sql_chunks("ticks", &[oversized_tag], TsPrecision::Ns, 1).is_err());
+    let error = build_insert_sql_chunks("ticks", &[oversized_tag], TsPrecision::Ns, 1)
+        .expect_err("49 字节 tag 必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
     let max_tag = point(&"X".repeat(48), 1);
     build_insert_sql_chunks("ticks", &[max_tag], TsPrecision::Ns, 1).expect("48 字节必须通过");
 }
@@ -152,16 +164,18 @@ fn native_ws_url_and_mode_validation() {
         };
         validate_mode(&config).expect("两种模式都必须通过校验");
     }
-    assert!(validate_mode(&TaosConfig {
+    let error = validate_mode(&TaosConfig {
         max_in_flight: 0,
         ..TaosConfig::default()
     })
-    .is_err());
-    assert!(validate_mode(&TaosConfig {
+    .expect_err("max_in_flight = 0 必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
+    let error = validate_mode(&TaosConfig {
         host: "td.example".to_owned(),
         ..TaosConfig::default()
     })
-    .is_err());
+    .expect_err("远程明文必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 }
 
 #[test]

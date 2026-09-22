@@ -302,10 +302,12 @@ async fn query_series_and_stream_return_typed_points() {
         tags.push(item.expect("行必须 Ok").tag_value);
     }
     assert_eq!(tags, vec!["BTC/USDT".to_owned(), "ETH/USDT".to_owned()]);
-    assert!(pool
-        .query_series_stream_chunked("ticks", 0, 1, 0)
-        .await
-        .is_err());
+    // TaosQueryStream 未实现 Debug，无法用 expect_err，改 match 提取错误。
+    let error = match pool.query_series_stream_chunked("ticks", 0, 1, 0).await {
+        Err(error) => error,
+        Ok(_) => panic!("chunk_hint = 0 必须拒绝"),
+    };
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
 }
 
 #[tokio::test]
@@ -338,8 +340,10 @@ async fn write_batcher_flushes_and_closes_through_pool() {
     assert_eq!(summary.total_failed, 0);
     assert_eq!(summary.pending, 0);
     assert!(summary.last_flush.is_complete());
-    assert!(
-        batcher.push(sample_points().remove(0)).await.is_err(),
-        "关闭后 push 必须拒绝"
-    );
+    let error = batcher
+        .push(sample_points().remove(0))
+        .await
+        .expect_err("关闭后 push 必须拒绝");
+    assert!(matches!(error, TaosError::Closed(_)), "{error:?}");
+    assert!(!error.is_retryable(), "已关闭不可重试");
 }

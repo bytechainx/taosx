@@ -75,11 +75,12 @@ fn assert_positioning() {
     // 两种模式都属已知取值；非法配置在模式校验阶段即被拒。
     validate_mode(&defaults).expect("REST 模式必须通过");
     validate_mode(&native).expect("NativeWs 模式必须通过");
-    assert!(validate_mode(&TaosConfig {
+    let error = validate_mode(&TaosConfig {
         max_in_flight: 0,
         ..TaosConfig::default()
     })
-    .is_err());
+    .expect_err("max_in_flight = 0 必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     // DTO 只描述物理表协议（时间戳 + tag + 两个文本单元格），不含领域语义。
     let point = TaosPoint::new("BTC/USDT", 42, "1.0", "1.1");
@@ -101,10 +102,10 @@ fn assert_data_conventions() {
     assert_eq!(TsPrecision::parse("US"), Some(TsPrecision::Us));
 
     let points = vec![TaosPoint::new("BTC/USDT", 1_500_000, "1.0", "2.0")];
-    assert!(
-        build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 10).is_err(),
-        "1_500_000 ns 无法无损表示为 ms，必须 fail-closed"
-    );
+    let error = build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 10)
+        .expect_err("1_500_000 ns 无法无损表示为 ms，必须 fail-closed");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    assert!(error.to_string().contains("精度"), "{error}");
 
     // tag 值十六进制编码进子表名，绝不直接进入标识符；字符串字面量按 TDengine 规则转义。
     let escaped = TaosPoint::new("A'B", 1, "1'0", "2\\0");
@@ -124,9 +125,14 @@ fn assert_data_conventions() {
     );
 
     // 标识符白名单：非字母/下划线开头或含非法字符一律拒绝。
-    assert!(build_insert_sql_chunks("1bad", &[], TsPrecision::Ns, 1).is_err());
-    assert!(build_insert_sql_chunks("a;drop", &[], TsPrecision::Ns, 1).is_err());
-    assert!(build_insert_sql_chunks("", &[], TsPrecision::Ns, 1).is_err());
+    for table in ["1bad", "a;drop", ""] {
+        let error =
+            build_insert_sql_chunks(table, &[], TsPrecision::Ns, 1).expect_err("非法表名必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_)),
+            "table={table:?} -> {error:?}"
+        );
+    }
 }
 
 /// S-3：硬上限 fail-closed、信号量背压受 `acquire_timeout` 约束、重试只针对瞬时错误。
@@ -159,7 +165,11 @@ async fn assert_resource_governance() {
             ..TaosConfig::default()
         },
     ] {
-        assert!(config.validate().is_err(), "越界配置必须拒绝: {config:?}");
+        let error = config.validate().expect_err("越界配置必须拒绝");
+        assert!(
+            matches!(error, TaosError::Config(_)),
+            "{config:?} -> {error:?}"
+        );
     }
 
     // 背压：max_in_flight = 1 时第二个并发请求在 acquire_timeout 内拿不到许可即超时。
@@ -174,6 +184,7 @@ async fn assert_resource_governance() {
     })
     .expect("池");
     let (first, second) = tokio::join!(pool.exec("SELECT 1"), pool.exec("SELECT 2"));
+    // 此处 is_ok() 仅用于统计成功个数（下方紧跟 matches!(Timeout) 类型断言），非裸判定。
     let outcomes = [first.is_ok(), second.is_ok()];
     assert_eq!(
         outcomes.iter().filter(|ok| **ok).count(),
@@ -187,7 +198,12 @@ async fn assert_resource_governance() {
     assert!(matches!(starved, TaosError::Timeout(_)), "{starved:?}");
 
     // 有界查询流：chunk_hint = 0 拒绝；行数与 chunk_hint 可观测。
-    assert!(TaosQueryStream::from_rows_chunked(vec![], 0).is_err());
+    // TaosQueryStream 未实现 Debug，无法用 expect_err，改 match 提取错误。
+    let error = match TaosQueryStream::from_rows_chunked(vec![], 0) {
+        Err(error) => error,
+        Ok(_) => panic!("chunk_hint = 0 必须拒绝"),
+    };
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
     let stream = TaosQueryStream::from_rows_chunked(
         vec![
             TaosPoint::new("A", 1, "1", "2"),
@@ -239,13 +255,15 @@ fn assert_security_conventions() {
         host: "td.example".into(),
         ..TaosConfig::default()
     };
-    assert!(remote_plain.validate().is_err(), "远程明文必须拒绝");
-    assert!(validate_mode(&TaosConfig {
+    let error = remote_plain.validate().expect_err("远程明文必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
+    let error = validate_mode(&TaosConfig {
         host: "td.example".into(),
         transport: TransportMode::NativeWs,
         ..TaosConfig::default()
     })
-    .is_err());
+    .expect_err("远程明文 NativeWs 必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     // 远程 TLS 必须同时配置认证密码。
     let remote_tls_no_password = TaosConfig {
@@ -253,7 +271,10 @@ fn assert_security_conventions() {
         tls: true,
         ..TaosConfig::default()
     };
-    assert!(remote_tls_no_password.validate().is_err());
+    let error = remote_tls_no_password
+        .validate()
+        .expect_err("远程 TLS 无密码必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
     let remote_secure = TaosConfig {
         host: "td.example".into(),
         tls: true,
@@ -276,7 +297,9 @@ async fn assert_acceptance() {
             .len(),
         3
     );
-    assert!(build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 0).is_err());
+    let error = build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 0)
+        .expect_err("max_rows = 0 必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
 
     // 池统计一致性：离线构造后 in_flight / closed 均为初始态。
     let pool = TaosPool::new(TaosConfig::default()).expect("离线构造");
@@ -291,10 +314,18 @@ async fn assert_acceptance() {
     assert!(pool.stats().closed);
 
     // 原生 TCP 端口探测对非法端口 fail-closed（不发握手帧）。
-    assert!(probe_native_tcp(&TaosConfig::default(), 0).await.is_err());
+    let error = probe_native_tcp(&TaosConfig::default(), 0)
+        .await
+        .expect_err("native_port = 0 必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    assert!(error.to_string().contains("native_port"), "{error}");
 
     // WS 短会话对空 SQL fail-closed（不伪造成功）。
-    assert!(exec_sql_ws(&TaosConfig::default(), "   ").await.is_err());
+    let error = exec_sql_ws(&TaosConfig::default(), "   ")
+        .await
+        .expect_err("空 SQL 必须拒绝");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    assert!(error.to_string().contains("SQL"), "{error}");
 
     // 非 NativeWs 模式不得走原生 WS 建连。
     assert!(matches!(

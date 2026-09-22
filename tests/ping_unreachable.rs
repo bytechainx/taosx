@@ -50,14 +50,37 @@ async fn connect_on_unreachable_address_returns_error() {
         hosts: vec!["127.0.0.1".to_owned()],
         ..unreachable_config()
     };
-    assert!(TaosPool::connect(config).await.is_err());
+    let error = TaosPool::connect(config)
+        .await
+        .expect_err("备用主机全部不可达必须失败");
+    assert!(
+        matches!(error, TaosError::Connection(_) | TaosError::Timeout(_)),
+        "{error:?}"
+    );
+    assert!(error.is_retryable(), "连接失败必须可重试: {error:?}");
 }
 
 #[tokio::test]
 async fn exec_and_query_on_unreachable_address_return_error() {
     let pool = TaosPool::new(unreachable_config()).expect("离线构造");
-    assert!(pool.exec("SELECT SERVER_VERSION()").await.is_err());
-    assert!(pool.query("SELECT 1").await.is_err());
+    let error = pool
+        .exec("SELECT SERVER_VERSION()")
+        .await
+        .expect_err("不可达地址 exec 必须失败");
+    assert!(
+        matches!(error, TaosError::Connection(_) | TaosError::Timeout(_)),
+        "{error:?}"
+    );
+    assert!(error.is_retryable(), "{error:?}");
+    let error = pool
+        .query("SELECT 1")
+        .await
+        .expect_err("不可达地址 query 必须失败");
+    assert!(
+        matches!(error, TaosError::Connection(_) | TaosError::Timeout(_)),
+        "{error:?}"
+    );
+    assert!(error.is_retryable(), "{error:?}");
     assert!(pool.metrics().sql_err >= 2);
 }
 
