@@ -150,11 +150,13 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
         socket
             .send(Message::Text(query_payload.into()))
             .await
-            .map_err(|error| TaosError::Unavailable(format!("ws 发送 query 失败: {error}")))?;
+.map_err(|error| TaosError::Unavailable(format!("ws 发送 query 失败: {error}")))?;
         let query_frame = read_frame(&mut socket).await?;
         ensure_code_zero(&query_frame, "query")?;
 
-        let _ = socket.close(None).await;
+        if let Err(error) = socket.close(None).await {
+            debug!(target: "taosx", %error, "ws 关闭失败（响应已获取，不影响正确性）");
+        }
         Ok(query_frame)
     };
     match tokio::time::timeout(config.timeout, attempt).await {
