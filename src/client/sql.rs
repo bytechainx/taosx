@@ -25,7 +25,7 @@ pub(super) const MAX_SYMBOL_BYTES: usize = 48;
 /// - `table` 必须是合法标识符（字母/下划线开头、≤94 字节），否则返回
 ///   [`TaosError::Invalid`]；
 /// - 子表名由 `table` + tag 值的十六进制编码构成，tag 值不直接进入标识符；
-/// - 字符串字面量按 TDengine 规则转义（`\` → `\\`、`'` → `\'`）；
+/// - 字符串字面量按 TDengine 规则转义（`\` → `\\`、`'` → `\'`、NUL → `\0`）；
 /// - 时间戳按 `precision` 换算，**未对齐目标精度时 fail-closed**，不静默截断。
 ///
 /// `max_rows` 必须在 `1..=HARD_MAX_BATCH_ROWS` 且单行不得超过 [`HARD_MAX_BATCH_BYTES`]。
@@ -173,12 +173,19 @@ pub(super) fn validate_ident(name: &str) -> TaosResult<()> {
     Ok(())
 }
 
-/// SQL 字符串字面量转义（`\` → `\\`，`'` → `\'`）。
+/// SQL 字符串字面量转义（`\` → `\\`，`'` → `\'`，NUL → `\0`）。
+///
+/// NUL 转义属**防御性加固**：TDengine C 层解析器对字面量中 NUL 字节的
+/// strlen 截断行为未经证实（见对抗审查报告 §4.1 裁决），此处主动消除
+/// NUL 进入 SQL 文本的可能，避免截断导致的语义漂移。
 ///
 /// `pub(super)`（=`pub(in crate::client)`）：与 `validate_ident` 对称，对 `client`
 /// 子树（含 `pool`）可见，不构成公开 API 面（R-API-001）。
 pub(super) fn escape_str(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('\'', "\\'")
+    value
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\0', "\\0")
 }
 
 /// 纳秒时间戳 → 目标精度数值；不允许静默精度损失。
@@ -210,5 +217,13 @@ mod tests {
     #[test]
     fn backslash_is_escaped() {
         assert_eq!(escape_str("a\\b"), "a\\\\b");
+    }
+
+    /// P2-6：NUL 字节必须转义为 `\0` 两字符序列（防御性加固）。
+    #[test]
+    fn nul_byte_is_escaped() {
+        assert_eq!(escape_str("a\0b"), "a\\0b");
+        assert_eq!(escape_str("\0"), "\\0");
+        assert_eq!(escape_str("\0'\\"), "\\0\\'\\\\");
     }
 }
