@@ -8,8 +8,26 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-23
+
 ### 修复
 
+- **原生 WS `exec_sql_ws` 缺 `conn` 会话握手，且把错误信封当成功返回（语义级 fail-open）**：
+  此前实现连上 `/rest/ws` 后**直接发 `{"action":"query",…}`**（没有 `conn` 建会话），且只
+  判断「响应体非空」即 `Ok(body)`。两个后果：**(a)** TDengine 对未握手请求一律回
+  `code:65535`（"server not connected"），请求实际从未执行；**(b)** 该错误信封被当作查询
+  结果返回给调用方。
+  现改为**两步协议**：发 `{"action":"conn","args":{"user":…,"password":…}}`（凭据取自
+  `TaosConfig`）→ 校验其响应 `code == 0` → 发 `{"action":"query","args":{"sql":…}}` →
+  校验其响应 `code == 0` → 返回 `query` 元数据帧。
+  **只有「明确读到整数 `code == 0`」才算成功**；以下一律 fail-closed 为
+  `TaosError::Unavailable`：响应帧既非 `Text` 也非 `Binary`（`Ping`/`Pong`/`Close`）、
+  帧不是合法 JSON、JSON 合法但缺 `code` 字段、`code` 存在但非整数（例如字符串 `"0"`）、
+  `code` 非 `0`。服务端 `message` 文本与口令一律不入错误消息。
+  属**实现向契约靠拢**（`docs/versioning.md` §3.1）：既有文档与函数注释已承诺「执行 SQL
+  且 fail-closed」，实现与之不符，故级别为 **PATCH**。
+  **边界**：本次只完成 `conn` 握手、`query` 元数据帧与状态码错误映射；**结果行需在
+  `query` 之后另发 `fetch`，未实现**，故 `exec_sql_ws` 的返回值**不含结果行**。
 - **竞态缺陷 — `WriteBatcher::close()` 窗口期数据静默丢失**：`close()` 在取出缓冲区并
   释放锁之后、重新获取锁之前存在无锁 `flush_batch` 窗口；此期间并发的 `push()` 因
   `closed` 仍为 `false` 而成功写入新数据，但 `close()` 重获锁后仅检查 `failed_pending`，
@@ -36,8 +54,16 @@
 - 补 `detect_precision` 经 `escape_str` 转义 database 名的 HTTP 捕获回归测试
 - 补多主机 failover 成功路径离线 mock 测试（`tests/failover_success.rs`）：首 host 失败、
   次 host 成功 + 多备用 host 两场景
-- 补原生 WebSocket 层离线 mock 三分支测试（`tests/ws_native_mock.rs`）：Text 帧、
-  Binary 帧解码、非数据帧 fail-closed、Ping 帧 fail-closed
+- 补原生 WebSocket 层离线 mock 测试（`tests/ws_native_mock.rs`，5 用例）：按两步协议
+  驱动「一次客户端请求 → 一批响应帧」，覆盖 Text 帧、Binary 帧解码、握手阶段非数据帧
+  （Close / Ping）fail-closed、握手响应前连接即结束 fail-closed
+- 新增 `tests/ws_conn_handshake.rs`（9 用例）：断言实现真的按 `conn` → `query` 顺序发送
+  且凭据取自配置、握手失败 ⇒ `Err` 且不再发 `query`、非 0 `code` ⇒ `Err`（fail-open 必红
+  对照）、P5「未握手」信封 ⇒ `Err`、以及非 JSON / 缺 `code` / `code` 非整数 / query 阶段
+  缺 `code` / query 阶段非数据帧 各一条 ⇒ 均 `Err`
+- 补 7 条 `src/native.rs` 内联单测：状态码严格解析（含超出 `i32` 的整数被拒）、非 0 码
+  映射、畸形状态消息文案、JSON 类型名与帧标签全覆盖、控制帧 fail-closed、Binary 帧非法
+  UTF-8 不得被当作成功
 
 ## [0.1.4] - 2026-09-22
 
