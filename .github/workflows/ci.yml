@@ -1,12 +1,22 @@
 name: CI
 
-# 组织 Rust 规范的 P0 门禁三件套（见仓库 AGENTS.md）：
-#   cargo fmt --check / cargo clippy --all-targets -- -D warnings / cargo test
+# 组织 Rust 规范的 P0 门禁三件套（见仓库 AGENTS.md「门禁（P0）」一节，逐字一致）：
+#   cargo fmt --all -- --check
+#   cargo clippy --workspace --all-targets --all-features -- -D warnings
+#   cargo test --workspace --all-features
+#
+# doc / deny 书面暂缓声明（组织 ci.md §1 允许项目宪章声明暂缓，fmt+clippy+test 不可豁免）：
+# - `cargo doc`：暂缓。单 crate 库，文档质量由 `#![deny(missing_docs)]` 与 doctest 覆盖，
+#   独立 doc 构建 job 待引入 `cargo deny` 时一并评估。
+# - `cargo deny check`：暂缓。仓库尚无 deny.toml，供应链审计计划 2026-12 前建立
+#   （跟踪于 P2 批次收口报告 follow-up）。
 #
 # 说明：
 # - 不使用 `--locked`：本仓库是库，`Cargo.lock` 不入库（由下游决定版本），
 #   CI 每次按 Cargo.toml 解析依赖，这与发布时的行为一致。
-# - `cargo test` 同时运行单元测试、集成测试与文档测试（doctest）。
+# - `cargo test --workspace --all-features` 同时运行单元测试、集成测试与文档测试（doctest）。
+# - 本仓库为单 crate workspace，`--workspace` 等价全量；`--all-features` 已在本地
+#   门禁验证全绿，与 AGENTS.md 命令保持一致。
 # - 不依赖任何外部服务：全部用例离线运行。
 # - 不设全局 `RUSTFLAGS`：`-D warnings` 只由 clippy 那一行的 `--` 参数表达，
 #   避免影响依赖构建且保持与本地门禁逐字一致。
@@ -33,11 +43,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt --check
-        run: cargo fmt --check
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
 
-      - name: cargo clippy --all-targets -- -D warnings
-        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: cargo test
-        run: cargo test
+      - name: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features
