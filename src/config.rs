@@ -351,6 +351,12 @@ impl TaosConfig {
         if self.write_max_attempts == 0 {
             return Err(TaosError::Config("write_max_attempts 必须 ≥ 1".to_owned()));
         }
+        if self.write_max_attempts > HARD_MAX_WRITE_MAX_ATTEMPTS {
+            return Err(TaosError::Config(format!(
+                "write_max_attempts 必须为 1..={HARD_MAX_WRITE_MAX_ATTEMPTS}（当前 {}）",
+                self.write_max_attempts
+            )));
+        }
         if !self.database.is_empty() && !valid_ident(&self.database) {
             return Err(TaosError::Config("database 标识符非法".to_owned()));
         }
@@ -820,6 +826,35 @@ write_max_attempts = 3
         let at_limit = TaosConfig {
             timeout: HARD_MAX_TIMEOUT,
             acquire_timeout: HARD_MAX_TIMEOUT,
+            ..Default::default()
+        };
+        at_limit.validate().expect("等于上限必须通过");
+    }
+
+    /// P2-2: write_max_attempts 超过 HARD_MAX_WRITE_MAX_ATTEMPTS 必须 fail-fast，
+    /// 错误消息含字段名与上限值。
+    #[test]
+    fn write_max_attempts_over_hard_max_reports_upper_bound() {
+        let config = TaosConfig {
+            write_max_attempts: HARD_MAX_WRITE_MAX_ATTEMPTS + 1,
+            ..Default::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("超限 write_max_attempts 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("write_max_attempts"),
+            "错误消息必须包含字段名 'write_max_attempts': {msg}"
+        );
+        assert!(
+            msg.contains(&HARD_MAX_WRITE_MAX_ATTEMPTS.to_string()),
+            "错误消息必须引用 HARD_MAX_WRITE_MAX_ATTEMPTS 实际值: {msg}"
+        );
+
+        // 恰好等于上限必须放行（边界不误伤）。
+        let at_limit = TaosConfig {
+            write_max_attempts: HARD_MAX_WRITE_MAX_ATTEMPTS,
             ..Default::default()
         };
         at_limit.validate().expect("等于上限必须通过");
