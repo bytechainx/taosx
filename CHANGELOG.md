@@ -8,6 +8,26 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-22
+
+### 变更
+
+- **内部结构改写（公开 API 与可观察契约均不变）**：按 `docs/module-rules.md` §5.5 的手法，把
+  `src/client.rs` 的 `impl TaosPool` 整块（构造、连接、并发额度、健康检查、SQL 收发与批量写入
+  入口共 19 个方法）下沉为 `src/client/pool.rs`（427 行）。门面 `src/client.rs` 保留模块文档、
+  `CLOSED_BIT` / `IN_FLIGHT_MASK` 常量、`build_http_client`、`TaosPool` 与 `PoolInner` /
+  `RequestGuard` 的**结构定义与字段**、`impl Debug` / `impl Drop`、`TaosClient` 别名、
+  `mod` / `pub use` 声明与**原有内联测试**。
+  两处提为 `pub(super)`，都是「父/兄弟/门面测试」必须看见的：`acquire`（门面内联测试直接驱动
+  并发额度与超时用例）与 `verify_decimal_schema`（被**兄弟模块** `client/write.rs` 的批量写入
+  路径调用）；其余私有辅助（`connect_one` / `detect_precision` / `exec_sql_raw*` /
+  `ensure_open`）只在本 impl 内互调，**保持私有**。
+  `src/client.rs` 生产段 **535 → 120** 行。
+  动机：`module-rules` 是元仓库必需检查，且它审计各仓**默认分支**，故当 `client.rs` 距
+  `MR-STRUCT-007` 的 800 行 ERROR 阈值只剩 265 行时，任一仓的任意改动都可能卡住元仓库的全部 PR。
+  属**纯搬移**（行多重集比对确认零代码行丢失：「仅旧」恰为提级的两条签名；内联测试段与旧文件
+  536–1061 行**逐字节一致**），129 项测试与 doctest 结果不变。
+
 ## [0.1.3] - 2026-09-22
 
 ### 变更
