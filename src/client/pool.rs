@@ -9,6 +9,7 @@
 //! 其余私有辅助（`connect_one` / `detect_precision` / `exec_sql_raw*` / `ensure_open`）
 //! 只在本 impl 内互调，**保持私有**。
 
+use super::response::truncate;
 use super::sql::escape_str;
 use super::*;
 
@@ -403,7 +404,16 @@ impl TaosPool {
         self.inner.metrics.add_response_bytes(text.len());
 
         if !status.is_success() {
-            // 响应正文可能夹带凭据或 SQL 片段，一律不入错误消息（见 src/error.rs 的约定）。
+            // 标准 §4：响应正文可能夹带凭据或 SQL 片段，一律不入错误消息
+            //（错误会向上传播进调用方日志/UI，泄露面不可控）。诊断信息改走
+            // debug 日志通道（默认关闭、运维显式 opt-in），截断至 256 字符
+            // 限制日志侧泄露面（R-SEC-006 / R-OBS-003）。
+            debug!(
+                target: "taosx",
+                status = status.as_u16(),
+                body = %truncate(&text, 256),
+                "非成功 HTTP 响应正文（仅诊断，不入错误消息）"
+            );
             return Err(TaosError::from_http_status(
                 status.as_u16(),
                 "响应正文已省略",

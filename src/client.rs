@@ -645,6 +645,44 @@ mod tests {
         assert!(matches!(error, TaosError::Config(_)));
     }
 
+    /// P2-9（C 案）：正文非空时错误消息仍维持占位符，正文只进 debug 日志（标准 §4）。
+    #[tokio::test]
+    async fn http_error_body_never_enters_message() {
+        let port = serve_response("401 Unauthorized", "password=leak-me", false).await;
+        let error = pool_with_port(port)
+            .exec("SELECT 1")
+            .await
+            .expect_err("401 必须报错");
+        assert!(matches!(error, TaosError::Backend { .. }), "{error:?}");
+        assert!(error.to_string().contains("响应正文已省略"), "{error}");
+        assert!(!error.to_string().contains("leak-me"), "{error}");
+    }
+
+    /// P2-9（C 案）：正文为空/全空白时同样维持占位符。
+    #[tokio::test]
+    async fn http_error_blank_body_keeps_placeholder() {
+        let port = serve_response("500 Internal Server Error", "   ", false).await;
+        let error = pool_with_port(port)
+            .exec("SELECT 1")
+            .await
+            .expect_err("500 必须报错");
+        assert!(matches!(error, TaosError::Unavailable(_)), "{error:?}");
+        assert!(error.to_string().contains("响应正文已省略"), "{error}");
+    }
+
+    /// P2-9（C 案）：超长正文也不得进入错误消息（截断只发生在 debug 日志侧）。
+    #[tokio::test]
+    async fn http_error_long_body_keeps_placeholder() {
+        let body: &'static str = Box::leak("diagnostic-line ".repeat(50).into_boxed_str());
+        let port = serve_response("503 Service Unavailable", body, false).await;
+        let error = pool_with_port(port)
+            .exec("SELECT 1")
+            .await
+            .expect_err("503 必须报错");
+        assert!(error.to_string().contains("响应正文已省略"), "{error}");
+        assert!(!error.to_string().contains("diagnostic-line"), "{error}");
+    }
+
     /// P1-3: `detect_precision` 的 SQL 必须通过 `escape_str` 转义 database 名（脆断耦合修复）。
     #[tokio::test]
     async fn detect_precision_uses_escaped_database_name() {
