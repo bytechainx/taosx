@@ -74,12 +74,15 @@ pub enum TransportMode {
 }
 
 impl TransportMode {
-    /// 从字符串解析（`rest` / `http` / `native` / `ws` / `native_ws` / `native-ws`）。
+    /// 从字符串解析（`rest` / `http` / `native` / `ws` / `nativews` / `native_ws` / `native-ws`）。
+    ///
+    /// 接受集**包含 [`Self::as_str`] 的输出** ⇒ 两个变体都满足 `parse(x.as_str()) == Some(x)`。
+    /// （大小写与首尾空白不敏感。）
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
             "rest" | "http" => Some(Self::Rest),
-            "native" | "ws" | "native_ws" | "native-ws" => Some(Self::NativeWs),
+            "native" | "ws" | "nativews" | "native_ws" | "native-ws" => Some(Self::NativeWs),
             _ => None,
         }
     }

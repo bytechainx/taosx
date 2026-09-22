@@ -707,6 +707,35 @@ write_max_attempts = 3
         assert!(TransportMode::parse("bogus").is_none());
     }
 
+    /// issue #16：`as_str()` 的输出必须能被 `parse` 接受（两个变体都要往返成立）。
+    ///
+    /// 修复前 `NativeWs` 断裂（`as_str()` 给 `nativews`，而接受集只有 `native` / `ws` /
+    /// `native_ws` / `native-ws`），使 `parse(as_str())` 返回 `None`。
+    #[test]
+    fn transport_parse_accepts_as_str_output() {
+        assert_eq!(
+            TransportMode::parse("nativews"),
+            Some(TransportMode::NativeWs)
+        );
+        assert_eq!(
+            TransportMode::parse(" NativeWS "),
+            Some(TransportMode::NativeWs),
+            "大小写与首尾空白不敏感"
+        );
+        for mode in [TransportMode::Rest, TransportMode::NativeWs] {
+            assert_eq!(TransportMode::parse(mode.as_str()), Some(mode), "{mode:?}");
+        }
+    }
+
+    /// issue #16 的第二条入口：TOML 的 `transport` 字段经 `de_transport` 走同一个 `parse`，
+    /// 故 `transport = "nativews"`（= `as_str()` 的输出）此前同样被拒。
+    #[test]
+    fn toml_accepts_as_str_output_of_transport() {
+        let config = TaosConfig::from_toml("schema_version = 1\ntransport = \"nativews\"\n")
+            .expect("TOML 必须接受 as_str() 给出的拼写");
+        assert_eq!(config.transport, TransportMode::NativeWs);
+    }
+
     #[test]
     fn env_parsed_reports_variable_name_without_echoing_value() {
         std::env::set_var(ENV_TIMEOUT_MS, "secret-not-a-number");
