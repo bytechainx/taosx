@@ -10,6 +10,12 @@
 
 ### 修复
 
+- **竞态缺陷 — `WriteBatcher::close()` 窗口期数据静默丢失**：`close()` 在取出缓冲区并
+  释放锁之后、重新获取锁之前存在无锁 `flush_batch` 窗口；此期间并发的 `push()` 因
+  `closed` 仍为 `false` 而成功写入新数据，但 `close()` 重获锁后仅检查 `failed_pending`，
+  不检查缓冲区，导致窗口内数据永久静默丢失。修复：`close()` 在释放锁之前先设置 `closing`
+  标志；`push()` 与 `flush()` 检查 `closed || closing` 时拒绝操作（返回
+  `TaosError::Closed`）。失败路径会清除 `closing` 以允许外部恢复后重试关闭。
 - **`with_message` 对 `Io` 变体静默丢弃上下文消息**（P1-2）：此前 `TaosError::with_message`
   对其他 9 个变体均替换消息，唯独 `Io` 变体忽略调用方传入的上下文，文档承诺「替换错误消息」
   与实现不一致。现改为保留原始 `std::io::Error` 的 `kind`，用新消息重建 `io::Error`。

@@ -89,7 +89,10 @@ struct FailedPending {
 struct Inner {
     table: String,
     buffer: Vec<TaosPoint>,
+    /// 禁止新写入（`close()` 或重复 `close()` 后）。
     closed: bool,
+    /// `close()` 进入无锁 flush 窗口前设置，禁止窗口期内并发 push 写入。
+    closing: bool,
     failed_pending: Option<FailedPending>,
     last_flush: Instant,
     config: WriteBatcherConfig,
@@ -113,6 +116,7 @@ impl WriteBatcher {
                 table: table.into(),
                 buffer: Vec::with_capacity(config.max_rows.min(1024)),
                 closed: false,
+                closing: false,
                 failed_pending: None,
                 last_flush: Instant::now(),
                 config,
@@ -123,9 +127,12 @@ impl WriteBatcher {
     }
 
     /// 推入点；达到行数上限或超出时间窗口时自动刷写。
+    ///
+    /// 在 `close()` 的刷写窗口期内（`closing` 已置位、锁已释放）拒绝写入，防止数据
+    /// 进入缓冲区后被即将结束的 `close()` 静默丢弃。
     pub async fn push(&self, point: TaosPoint) -> TaosResult<()> {
         let mut guard = self.inner.lock().await;
-        if guard.closed {
+        if guard.closed || guard.closing {
             return Err(TaosError::Closed("WriteBatcher 已关闭".to_owned()));
         }
         if guard.failed_pending.is_some() {
@@ -146,9 +153,11 @@ impl WriteBatcher {
     }
 
     /// 刷空缓冲。
+    ///
+    /// 在 `close()` 进行中（`closing` 已置位）时拒绝刷写，避免并发刷写干扰关闭流程。
     pub async fn flush(&self) -> TaosResult<BatchWriteReport> {
         let mut guard = self.inner.lock().await;
-        if guard.closed {
+        if guard.closed || guard.closing {
             return Err(TaosError::Closed("WriteBatcher 已关闭".to_owned()));
         }
         if guard.failed_pending.is_some() {
@@ -164,6 +173,13 @@ impl WriteBatcher {
     /// 刷写并关闭；成功返回末次 flush 报告，失败返回 [`BatcherCloseError`]。
     ///
     /// 存在未恢复 pending 时 fail-closed；部分 flush 失败时不标记 closed。
+    ///
+    /// ## 关闭语义
+    ///
+    /// `close()` 在取出缓冲并释放锁**之前**设置 `closing` 标志；此后任何并发
+    /// `push()` 或 `flush()` 都将被拒绝（返回 `Closed`），消除原实现中无锁
+    /// `flush_batch` 窗口期内并发 push 数据被静默丢失的竞态缺陷。失败路径会清除
+    /// `closing` 以允许外部恢复后重试。
     pub async fn close(&self) -> Result<BatchWriteReport, BatcherCloseError> {
         let mut guard = self.inner.lock().await;
         if guard.closed {
@@ -175,6 +191,8 @@ impl WriteBatcher {
                 source: pending_gate_error(),
             });
         }
+        // 持锁置 closing：此后任何并发 push/flush 在窗口期内将被拒绝
+        guard.closing = true;
         let table = guard.table.clone();
         let batch = std::mem::take(&mut guard.buffer);
         guard.last_flush = Instant::now();
@@ -184,6 +202,7 @@ impl WriteBatcher {
             Ok(report) => {
                 let mut guard = self.inner.lock().await;
                 if guard.failed_pending.is_some() {
+                    guard.closing = false;
                     return Err(BatcherCloseError {
                         summary: close_report_from(&guard, report),
                         source: pending_gate_error(),
@@ -193,7 +212,8 @@ impl WriteBatcher {
                 Ok(report)
             }
             Err(source) => {
-                let guard = self.inner.lock().await;
+                let mut guard = self.inner.lock().await;
+                guard.closing = false;
                 Err(BatcherCloseError {
                     summary: close_report_from(&guard, BatchWriteReport::default()),
                     source,
@@ -459,6 +479,118 @@ mod tests {
         assert_eq!(error.summary.pending, 1);
         assert!(error.to_string().contains("pending=1"));
         assert_eq!(batcher.close_report().await.pending, 1);
+    }
+
+    /// 创建 mock 服务器：前 `quick` 个响应立即返回，最后一个响应在 barrier 同步后、
+    /// `go` 通知后返回。用于确定性复现 close() 窗口期竞态。
+    async fn serve_sequence_with_delayed_last(
+        quick: Vec<&'static str>,
+        delayed: &'static str,
+        go: Arc<tokio::sync::Notify>,
+        ready: Arc<tokio::sync::Barrier>,
+    ) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            for body in quick {
+                let (mut stream, _) = listener.accept().await.expect("accept quick");
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).await.expect("read quick request");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write quick response");
+            }
+            // 最后一个响应：等待 barrier 同步，再等待 go 通知
+            let (mut stream, _) = listener.accept().await.expect("accept delayed");
+            let mut request = [0u8; 4096];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read delayed request");
+            ready.wait().await;
+            go.notified().await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{delayed}",
+                delayed.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write delayed response");
+        });
+        port
+    }
+
+    /// 确定性复现 P0-1 竞态：close() 无锁 flush 窗口期内并发 push 的数据被静默丢失。
+    ///
+    /// 场景：close() 在 flush_batch（无锁网络 I/O）期间，另一个 task 的 push()
+    /// 因 `guard.closed` 仍为 `false` 而成功写入 buffer，但 close() 重获锁后不检查
+    /// buffer，直接设 `closed = true`，导致该数据永久静默丢失。
+    #[tokio::test]
+    async fn close_window_concurrent_push_rejected_not_silently_lost() {
+        let go = Arc::new(tokio::sync::Notify::new());
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
+
+        // 服务端：CREATE_OK + DESCRIBE_OK 立即返回，INSERT_OK 等 barrier + go 信号
+        let port = serve_sequence_with_delayed_last(
+            vec![CREATE_OK, DESCRIBE_OK],
+            INSERT_OK,
+            go.clone(),
+            ready.clone(),
+        )
+        .await;
+
+        let batcher = Arc::new(batcher(pool_with(port, 100)));
+
+        // 预推入 INIT 点（不触发刷写：max_rows=100 > 1），使 close() 有数据可刷
+        batcher
+            .push(point("INIT", 1_000_000))
+            .await
+            .expect("init push");
+
+        // 后台 spawn close() — insert 将阻塞在 ready barrier + go 通知处
+        let b = batcher.clone();
+        let close_handle = tokio::spawn(async move { b.close().await });
+
+        // barrier 同步：确保 close 已发送 INSERT 请求、进入 flush_batch 等待
+        ready.wait().await;
+
+        // close 卡在 flush_batch（Mutex 已释放），主线程 push —— 这是竞态窗口
+        let push_result = batcher.push(point("RACE", 2_000_000)).await;
+
+        // 放行 close 的 INSERT 响应
+        go.notify_one();
+
+        // 等待 close 完成
+        let _close_report = close_handle
+            .await
+            .expect("close task 不应 panic")
+            .expect("close 应成功（INSERT_OK）");
+
+        // 核心断言：窗口内 push 不得静默丢失
+        match push_result {
+            Ok(()) => {
+                // push 成功 → 数据必须被计入，不能丢失
+                let (accepted, _) = batcher.totals().await;
+                assert!(
+                    accepted >= 2,
+                    "push 在 close 窗口内成功则数据必须被刷写计入: \
+                     accepted={accepted}（期望 >=2，INIT + RACE）"
+                );
+            }
+            Err(ref e) => {
+                // push 被拒绝 → 这将是方案 A 修复后的预期行为
+                assert!(
+                    matches!(e, TaosError::Closed(_)),
+                    "窗口内 push 应返回 Closed 错误，实际: {e}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
