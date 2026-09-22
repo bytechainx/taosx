@@ -142,6 +142,9 @@ impl RetryPolicy {
                 }
             }
         }
+        // 逻辑不可达：attempts ≥ 1 时末次迭代必在循环内 return
+        // （is_retryable=false 或 attempt+1>=attempts 分支）；此 fallback
+        // 仅满足编译器的控制流分析。
         Err(last.unwrap_or_else(|| TaosError::Timeout("重试策略未执行任何尝试".to_owned())))
     }
 }

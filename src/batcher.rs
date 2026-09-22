@@ -114,6 +114,9 @@ impl WriteBatcher {
             pool,
             inner: Arc::new(Mutex::new(Inner {
                 table: table.into(),
+                // 容量硬截断为 1024 是有意权衡：避免大 max_rows（配置上限
+                // HARD_MAX_BATCH_ROWS = 10_000）时过量预分配；超限后 Vec
+                // 重分配为摊还 O(1)，性能影响微小。
                 buffer: Vec::with_capacity(config.max_rows.min(1024)),
                 closed: false,
                 closing: false,
@@ -128,8 +131,15 @@ impl WriteBatcher {
 
     /// 推入点；达到行数上限或超出时间窗口时自动刷写。
     ///
-    /// 在 `close()` 的刷写窗口期内（`closing` 已置位、锁已释放）拒绝写入，防止数据
+/// 在 `close()` 的刷写窗口期内（`closing` 已置位、锁已释放）拒绝写入，防止数据
     /// 进入缓冲区后被即将结束的 `close()` 静默丢弃。
+    ///
+    /// # Cancellation
+    ///
+    /// **非 cancel-safe**：达到阈值触发刷写时，缓冲已被 `take`（点已移出 batcher）；
+    /// 若该刷写 future 在 `.await` 点被取消（如外层 `select!` / `timeout` 丢弃），
+    /// 这批点随之丢失，不会回到缓冲或 pending。调用方须自行保证不取消进行中的
+    /// `push`，或接受丢失（与模块级文档「非 exactly-once」一致）。
     pub async fn push(&self, point: TaosPoint) -> TaosResult<()> {
         let mut guard = self.inner.lock().await;
         if guard.closed || guard.closing {
