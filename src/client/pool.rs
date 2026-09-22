@@ -9,6 +9,7 @@
 //! 其余私有辅助（`connect_one` / `detect_precision` / `exec_sql_raw*` / `ensure_open`）
 //! 只在本 impl 内互调，**保持私有**。
 
+use super::sql::escape_str;
 use super::*;
 
 impl TaosPool {
@@ -289,8 +290,9 @@ impl TaosPool {
     async fn detect_precision(&self) -> TaosResult<TsPrecision> {
         let database = self.inner.config.database.clone();
         validate_ident(&database)?;
+        let escaped = escape_str(&database);
         let sql = format!(
-            "SELECT `precision` FROM information_schema.ins_databases WHERE name='{database}'"
+            "SELECT `precision` FROM information_schema.ins_databases WHERE name='{escaped}'"
         );
         let result = self.exec_sql_raw(&sql, false).await?;
         result

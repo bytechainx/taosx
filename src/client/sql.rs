@@ -174,6 +174,9 @@ pub(super) fn validate_ident(name: &str) -> TaosResult<()> {
 }
 
 /// SQL 字符串字面量转义（`\` → `\\`，`'` → `\'`）。
+///
+/// `pub(super)`（=`pub(in crate::client)`）：与 `validate_ident` 对称，对 `client`
+/// 子树（含 `pool`）可见，不构成公开 API 面（R-API-001）。
 pub(super) fn escape_str(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
@@ -188,4 +191,24 @@ pub(super) fn encode_timestamp(timestamp_ns: i64, precision: TsPrecision) -> Tao
         )));
     }
     Ok(stored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_str;
+
+    #[test]
+    fn plain_text_passes_through() {
+        assert_eq!(escape_str("test"), "test");
+    }
+
+    #[test]
+    fn single_quote_is_escaped() {
+        assert_eq!(escape_str("it's"), "it\\'s");
+    }
+
+    #[test]
+    fn backslash_is_escaped() {
+        assert_eq!(escape_str("a\\b"), "a\\\\b");
+    }
 }
