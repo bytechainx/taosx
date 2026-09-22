@@ -174,7 +174,10 @@ pub(super) fn validate_ident(name: &str) -> TaosResult<()> {
 }
 
 /// SQL 字符串字面量转义（`\` → `\\`，`'` → `\'`）。
-pub(crate) fn escape_str(value: &str) -> String {
+///
+/// `pub(super)`（=`pub(in crate::client)`）：与 `validate_ident` 对称，对 `client`
+/// 子树（含 `pool`）可见，不构成公开 API 面（R-API-001）。
+pub(super) fn escape_str(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
