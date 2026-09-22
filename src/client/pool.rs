@@ -17,12 +17,28 @@ impl TaosPool {
     /// 同步构造（**仅校验配置**，不建立网络连接、不探测服务端）。
     ///
     /// 适用于 fail-closed 校验与离线背压路径；生产入口请使用 [`TaosPool::connect`]。
+    ///
+    /// 本路径为同步构造：`tls_ca_file` 以 `std::fs` 同步读取（同步上下文合法，
+    /// R-RT-010 只约束 async 路径）；async 使用者经 [`TaosPool::connect`] 无阻塞 I/O。
     pub fn new(config: TaosConfig) -> TaosResult<Self> {
         config.validate()?;
         let http = build_http_client(&config)?;
+        Ok(Self::from_config_and_http(config, http))
+    }
+
+    /// 异步构造（语义同 [`TaosPool::new`]；CA 读取移入 `spawn_blocking`，`connect` 路径专用）。
+    /// `pub(super)`：与 `acquire` 同理——被门面内联测试驱动，crate 外不可见（R-API-001）。
+    pub(super) async fn new_async(config: TaosConfig) -> TaosResult<Self> {
+        config.validate()?;
+        let http = build_http_client_async(&config).await?;
+        Ok(Self::from_config_and_http(config, http))
+    }
+
+    /// 池唯一装配点（同步/异步构造路径共享，W-1）。
+    fn from_config_and_http(config: TaosConfig, http: reqwest::Client) -> Self {
         let initial_precision = config.precision.unwrap_or(TsPrecision::Ms);
         let max_in_flight = config.max_in_flight;
-        Ok(Self {
+        Self {
             inner: Arc::new(PoolInner {
                 http,
                 config,
@@ -32,7 +48,7 @@ impl TaosPool {
                 drained: Notify::new(),
                 metrics: OpCounters::new(),
             }),
-        })
+        }
     }
 
     /// 连接：构建 HTTP 客户端、可选建库、探测精度、`ping`。
@@ -66,7 +82,7 @@ impl TaosPool {
         if config.transport == TransportMode::NativeWs {
             native::connect_native_ws(&config).await?;
         }
-        let pool = Self::new(config)?;
+        let pool = Self::new_async(config).await?;
 
         // REST 路径：确保 database 存在 + 精度探测 + ping。
         // NativeWs 仅完成握手探测；SQL 默认仍走 REST（`exec_sql_ws` 提供 WS 会话）。
