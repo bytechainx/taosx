@@ -4,3 +4,5 @@
 Cargo.lock
 # graft 代码图谱缓存（可再生）
 /graft/
+# 隔离工作树
+/.worktrees/

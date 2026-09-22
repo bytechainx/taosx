@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **竞态缺陷 — `WriteBatcher::close()` 窗口期数据静默丢失**：`close()` 在取出缓冲区并
+  释放锁之后、重新获取锁之前存在无锁 `flush_batch` 窗口；此期间并发的 `push()` 因
+  `closed` 仍为 `false` 而成功写入新数据，但 `close()` 重获锁后仅检查 `failed_pending`，
+  不检查缓冲区，导致窗口内数据永久静默丢失。修复：`close()` 在释放锁之前先设置 `closing`
+  标志；`push()` 与 `flush()` 检查 `closed || closing` 时拒绝操作（返回
+  `TaosError::Closed`）。失败路径会清除 `closing` 以允许外部恢复后重试关闭。
+
 ## [0.1.4] - 2026-09-22
 
 ### 变更
