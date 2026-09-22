@@ -86,12 +86,20 @@ Basic 认证；请求/响应体大小都受 `batch_max_bytes` / `max_response_by
 | `build_native_ws_url(&config)` | 纯函数，构造 `ws(s)://host:port/rest/ws` |
 | `validate_mode(&config)` | 校验配置 + 传输模式一致性 |
 | `connect_native_ws(&config)` | 有 deadline 的握手探测，成功即关闭 |
-| `exec_sql_ws(&config, sql)` | 短会话：握手 → 发送 `{action:"query",args:{sql}}` → 读首帧 → 关闭 |
+| `exec_sql_ws(&config, sql)` | 短会话两步协议：`conn` 建会话 → `query` → 读元数据帧 → 关闭 |
 | `probe_native_tcp(&config, port)` | 原生 SQL 端口（默认 6030）可达性探测，不发协议帧 |
 
 `TaosPool::connect` 在 `TransportMode::NativeWs` 下会先做一次 WS 握手探测；SQL 数据面
-仍默认走 REST（可用 `TaosPool::exec_sql_ws` 显式走 WS）。WS 空帧不会伪造成功，一律
-fail-closed 为 `TaosError::Unavailable`。
+仍默认走 REST（可用 `TaosPool::exec_sql_ws` 显式走 WS）。`/rest/ws` 是**两步协议**：
+`exec_sql_ws` 先发 `{"action":"conn","args":{"user":…,"password":…}}` 建会话，读到
+`code == 0` 后再发 `{"action":"query","args":{"sql":…}}`，返回 `query` 的**元数据响应帧**。
+**只有「明确读到整数 `code == 0`」才算成功**：非 0 `code`、非 JSON 帧、缺 `code` 字段、
+`code` 非整数、以及既非 `Text` 也非 `Binary` 的帧（`Ping`/`Pong`/`Close`）一律
+fail-closed 为 `TaosError::Unavailable`；凭据与服务端 `message` 文本均不入日志与错误消息。
+
+> **阶段 1 边界**：只完成 `conn` 握手 + `query` 元数据帧 + 状态码错误映射。**结果行需在
+> `query` 之后另发 `fetch`，本阶段不实现**，因此 `exec_sql_ws` 的返回值**不含结果行**，
+> 不得据此声称已支持完整结果读取。
 
 ## SQL 注入防护
 
