@@ -247,11 +247,21 @@ impl TaosConfig {
         }
 
         if let Some(password) = root.remove("password") {
-            let password = password.as_str().unwrap_or("非字符串");
-            if !password.is_empty() {
-                return Err(TaosError::Config(
-                    "TOML 禁止非空 password 字段，请改用环境变量注入".to_owned(),
-                ));
+            match password.as_str() {
+                // 空字符串占位放行（表示密码走环境变量注入）。
+                Some("") => {}
+                Some(_) => {
+                    return Err(TaosError::Config(
+                        "TOML 禁止非空 password 字段，请改用环境变量注入".to_owned(),
+                    ));
+                }
+                // 非字符串类型：只揭示类型问题，不回显取值内容。
+                None => {
+                    return Err(TaosError::Config(
+                        "TOML password 必须为字符串类型；禁止非空 password 字段，请改用环境变量注入"
+                            .to_owned(),
+                    ));
+                }
             }
         }
 
@@ -858,5 +868,38 @@ write_max_attempts = 3
             ..Default::default()
         };
         at_limit.validate().expect("等于上限必须通过");
+    }
+
+    /// P2-5: TOML password 为非字符串类型时，错误消息必须揭示类型问题，
+    /// 且不泄漏取值内容。
+    #[test]
+    fn toml_non_string_password_message_reveals_type_issue() {
+        let error = TaosConfig::from_toml("schema_version = 1\npassword = 12345\n")
+            .expect_err("整数类型 password 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("字符串"),
+            "错误消息必须揭示类型问题（含「字符串」）: {msg}"
+        );
+        assert!(
+            msg.contains("password"),
+            "错误消息必须包含字段名 'password': {msg}"
+        );
+        assert!(!msg.contains("12345"), "错误消息不得泄漏取值内容: {msg}");
+
+        // 布尔类型同样按类型问题拒绝。
+        let error = TaosConfig::from_toml("schema_version = 1\npassword = true\n")
+            .expect_err("布尔类型 password 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("字符串"),
+            "错误消息必须揭示类型问题（含「字符串」）: {msg}"
+        );
+        assert!(!msg.contains("true"), "错误消息不得泄漏取值内容: {msg}");
+
+        // 空字符串 password 仍然放行（既有语义不变）。
+        let config = TaosConfig::from_toml("schema_version = 1\npassword = \"\"\n")
+            .expect("空字符串 password 必须放行");
+        assert!(config.password.is_empty());
     }
 }
