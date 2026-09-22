@@ -174,7 +174,7 @@ pub(super) fn validate_ident(name: &str) -> TaosResult<()> {
 }
 
 /// SQL 字符串字面量转义（`\` → `\\`，`'` → `\'`）。
-pub(super) fn escape_str(value: &str) -> String {
+pub(crate) fn escape_str(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
@@ -188,4 +188,24 @@ pub(super) fn encode_timestamp(timestamp_ns: i64, precision: TsPrecision) -> Tao
         )));
     }
     Ok(stored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_str;
+
+    #[test]
+    fn plain_text_passes_through() {
+        assert_eq!(escape_str("test"), "test");
+    }
+
+    #[test]
+    fn single_quote_is_escaped() {
+        assert_eq!(escape_str("it's"), "it\\'s");
+    }
+
+    #[test]
+    fn backslash_is_escaped() {
+        assert_eq!(escape_str("a\\b"), "a\\\\b");
+    }
 }
