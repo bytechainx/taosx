@@ -13,12 +13,12 @@
 //! # 主测：NativeWs（env 给原生端口 6030）
 //! set -a; source /home/workspace/sre/secrets/env/taosx.env; set +a
 //! cd /home/workspace/bytechainx/taosx
-//! CARGO_TARGET_DIR=/home/workspace/bytechainx/.cargo-target \
+//! CARGO_TARGET_DIR=/home/workspace/bytechainx/.cargo/target \
 //!   cargo test --test live_taos -- --ignored --test-threads=1
 //!
 //! # 补测：REST（env 给 taosAdapter 端口 6041）
 //! set -a; source /home/workspace/sre/secrets/env/taosx-rest.env; set +a
-//! CARGO_TARGET_DIR=/home/workspace/bytechainx/.cargo-target \
+//! CARGO_TARGET_DIR=/home/workspace/bytechainx/.cargo/target \
 //!   cargo test --test live_taos -- --ignored --test-threads=1
 //! ```
 //!
