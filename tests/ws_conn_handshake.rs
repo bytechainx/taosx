@@ -16,7 +16,9 @@
 //! 3. 响应 `code` 非 0 ⇒ `Err`（原实现把 `code:65535` 信封当成功返回 = fail-open 缺陷）；
 //! 4. 状态字段缺失/畸形（非 JSON / 无 `code` / `code` 非整数 / 非数据帧）⇒ 一律 `Err`。
 //!
-//! 另含 P5 必红对照：未握手场景的 65535 信封必须失败。
+//! 另含 **fail-open 必红对照** `not_connected_envelope_must_fail`：未握手场景第 0 批
+//! 即 65535 信封，原实现把它原样当成功返回。其余用例的先红归因逐条写在各自文档注释里
+//! （③ 那条先红于「缺握手」，**不是**于错误信封）。
 //!
 //! **边界（阶段 1）**：只校验到 `query` 的元数据响应帧；结果行需另发 `fetch`，本阶段
 //! 未实现，用例不断言任何结果行语义。
@@ -185,9 +187,16 @@ async fn conn_rejected_maps_to_err_without_leaking_password() {
     assert_eq!(json_requests(&seen).len(), 1, "握手失败后不得继续发 query");
 }
 
-/// ③ fail-open 必红对照：`query` 回 `code:65535` 的信封时，实现必须返回 `Err`。
+/// ③ `query` 阶段收到非 0 `code` 的信封 ⇒ 必须 `Err`（两步握手都走了，仍不得误报成功）。
 ///
-/// 修复前该路径返回 `Ok(错误信封)`——正是本阶段要修掉的语义级 fail-open。
+/// **先红归因（勿误记）**：本用例在**未修实现**上也是红的，但那条红**不来自**错误信封——
+/// 旧实现只发 1 个请求（无 `conn`），mock 按「第 0 批」回的是 `conn_ok_frame()`
+/// （`code:0`），旧实现把它当查询结果返回 ⇒ 得到 `Ok`。故本用例先红钉的是
+/// 「**必须先 `conn` 握手、不能拿首帧冒充结果**」。
+/// **fail-open 本身的必红对照**是 `not_connected_envelope_must_fail`（第 0 批即 65535
+/// 信封 ⇒ 旧实现返回 `Ok(信封)`），以及 `non_json_frame_fails_closed` /
+/// `frame_without_code_field_fails_closed` / `non_integer_code_fails_closed`
+/// （畸形状态字段被当作成功）。
 #[tokio::test]
 async fn query_nonzero_code_is_error_not_success() {
     let (port, _seen) =
@@ -208,7 +217,10 @@ async fn query_nonzero_code_is_error_not_success() {
     );
 }
 
-/// ④-a P5 必红对照：模拟「未握手」的服务端行为（首帧即 65535 信封），必须失败。
+/// ④-a **fail-open 必红对照**：模拟「未握手」的服务端行为（第 0 批即 65535 信封）。
+///
+/// 未修实现把该错误信封原样当成功返回（实测得到 `Ok({"code":65535,"message":"server
+/// not connected",…})`）⇒ 用例红。修复后必须 `Err`，且首帧即失败时不得继续发 `query`。
 #[tokio::test]
 async fn not_connected_envelope_must_fail() {
     let (port, seen) = start_ws_mock(vec![
