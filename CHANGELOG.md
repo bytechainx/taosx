@@ -8,6 +8,21 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **非成功 HTTP 响应的诊断输出改经 debug 日志**（P2-9）：错误消息维持「响应正文已省略」
+  占位符（安全边界，由 `tests/aidd_boundary.rs` 锁定，不回显响应正文），截断 256 字节的
+  正文改经 `debug!(target: "taosx", status, body = …)` 输出，诊断信息仅在 debug 日志级别展开。
+- **`json_cell_to_string` 文档标注 Number 精度局限**（P2-8）：大浮点值可能以科学记数法
+  输出（如 `1e300` → `"1e+300"`），以特征化测试锁定当前行为；生产逻辑不变。
+- **补齐三处语义文档/注释**（P2-11、P2-13、P2-14）：`WriteBatcher::push` 取消语义
+  （flush future 被取消时已 take 的 batch 丢失，非 exactly-once）、retry fallback
+  逻辑不可达分支注释、批量缓冲容量 `min(1024)` 预分配权衡注释。
+- **CI 门禁命令与 AGENTS.md 对齐为组织标准**（P2-20）：`cargo fmt --all -- --check` /
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings` /
+  `cargo test --workspace --all-features`，两处逐字一致；`cargo doc` 与 `cargo deny check`
+  补书面暂缓声明（doc 由 `#![deny(missing_docs)]` + doctest 覆盖；deny.toml 计划 2026-12 前建立）。
+
 ## [0.1.5] - 2026-09-23
 
 ### 修复
@@ -46,6 +61,28 @@
   直接置于 `WHERE name='{database}'` 的单引号字面量位置，安全性仅依赖 `validate_ident`
   白名单校验（脆断耦合——未来若放宽 `validate_ident` 即破坏转义假设）。现改为经
   `escape_str` 转义后再拼入 SQL，与标识符校验解耦。
+- **`timeout` / `acquire_timeout` 新增硬上界**（P2-1）：`HARD_MAX_TIMEOUT`（3600 秒），
+  `validate()` 超界报错。此前仅有下界校验，TOML `u64::MAX` 毫秒会饱和为 `Duration::MAX`，
+  超时形同虚设；现由上界校验 fail-fast 兜底。
+- **`write_max_attempts` 新增硬上界**（P2-2）：`HARD_MAX_WRITE_MAX_ATTEMPTS`（10），
+  `validate()` 超界报错，消息含允许范围与当前值。
+- **`env_parsed` 空串/空白串视为未设置**（P2-4）：返回 `Ok(None)`，对齐 `env_non_empty` /
+  `env_trimmed` 语义；非空但非法的取值仍报错且只报告变量名、不回显取值。
+- **TOML `password` 非字符串类型报错不泄漏取值**（P2-5）：错误消息改为「必须为字符串类型；
+  禁止非空 password 字段，请改用环境变量注入」，揭示类型问题并引导正确注入方式。
+- **`escape_str` 补充 NUL 转义**（P2-6）：`\0` → `\\0`，加固 SQL 字符串字面量的注入防护
+  （防御性加固，TDengine 语义下 NUL 本非合法字面量成分）。
+- **`build_http_client` 的 async 路径消除同步文件 I/O**（P2-7，R-RT-010）：CA 证书读取改经
+  `tokio::task::spawn_blocking(std::fs::read)`；新增共享装配点 `assemble_http_client` 与
+  异步构造 `new_async`（`pub(super)`，crate 外不可见），同步 `TaosPool::new` 保留
+  `std::fs::read`（R-RT-010 只约束 async 可达路径）。实施偏差说明：因本仓 tokio 未启用
+  `fs` feature，以 `spawn_blocking` 替代 `tokio::fs::read`（组织认可手段，零 Cargo.toml 变更）。
+- **WS 帧/消息大小上限联动 `max_response_bytes`**（P2-10）：`exec_sql_ws` 改用
+  `connect_async_with_config`，经私有纯函数 `ws_config_from` 把 `max_frame_size` /
+  `max_message_size` 绑定为 `Some(config.max_response_bytes)`，防止服务端超大帧导致无界
+  内存放大，与 REST 路径响应限额策略一致；`connect_native_ws` 握手探测不读数据帧，保持默认。
+- **`exec_sql_ws` 关闭错误不再静默**（P2-12）：close 失败改经 `debug!` 日志输出
+  （响应已获取，不影响正确性，但不再无声吞错）。
 
 ### 测试
 
@@ -64,6 +101,18 @@
 - 补 7 条 `src/native.rs` 内联单测：状态码严格解析（含超出 `i32` 的整数被拒）、非 0 码
   映射、畸形状态消息文案、JSON 类型名与帧标签全覆盖、控制帧 fail-closed、Binary 帧非法
   UTF-8 不得被当作成功
+- 补 `write_batch_idempotent` 直接测试（P2-15）：mock 回放 896 繁忙错误驱动整批重试，
+  断言请求次数与 report 字段；不可重试子路径断言本地拒绝未触达网络。同时修正
+  `tests/http_roundtrip.rs` 非法表名段的失实注释并强化其断言
+- 补 batcher 时间窗触发 flush 测试（P2-16）：`flush_interval` 10ms + sleep 驱动，
+  断言 totals 由 (0,0) 到 (2,0)，消除该路径零覆盖
+- 强化 `tests/` 目录 7 个文件共 37 处裸 `is_err()` / `is_ok()` 断言（P2-17，R-TEST-001/002）：
+  改为错误变体 `matches!` 判定，关键场景补消息内容与「不回显非法标识符」断言；
+  1 处紧跟类型断言的计数用法保留并就地注释理由
+- `tests/live_taos.rs` 两处 `#[ignore]` 补 owner 与 2026-12 复查期限（P2-18）
+- 清理 `tests/api_surface.rs` 重言式断言（常量求和恒真比较改为有鉴别力的秩序关系断言），
+  并补 `ws_probe_totals` 数值校验测试：触发一次不可达握手，严格断言失败计数 +1、
+  成功计数不变（P2-19）
 
 ## [0.1.4] - 2026-09-22
 

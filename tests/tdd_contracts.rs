@@ -210,22 +210,24 @@ fn config_validate_enforces_hard_limits() {
         max_in_flight: 0,
         ..Default::default()
     };
-    assert!(zero_in_flight.validate().is_err(), "0 并发必须拒绝");
+    let error = zero_in_flight.validate().expect_err("0 并发必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     let over_limit = TaosConfig {
         max_in_flight: HARD_MAX_IN_FLIGHT + 1,
         ..Default::default()
     };
-    assert!(over_limit.validate().is_err(), "超过硬上限必须拒绝");
+    let error = over_limit.validate().expect_err("超过硬上限必须拒绝");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     let remote_plaintext = TaosConfig {
         host: "td.example".into(),
         ..Default::default()
     };
-    assert!(
-        remote_plaintext.validate().is_err(),
-        "远程明文必须 fail-closed"
-    );
+    let error = remote_plaintext
+        .validate()
+        .expect_err("远程明文必须 fail-closed");
+    assert!(matches!(error, TaosError::Config(_)), "{error:?}");
 
     let defaults = TaosConfig::default();
     assert_eq!(defaults.host, DEFAULT_HOST);

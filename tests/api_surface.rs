@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use taosx::{
-    build_insert_sql_chunks, build_native_ws_url, exec_sql_ws, probe_native_tcp, validate_mode,
-    ws_probe_totals, BatchWritePartialError, BatchWriteReport, BatcherCloseError,
+    build_insert_sql_chunks, build_native_ws_url, connect_native_ws, exec_sql_ws, probe_native_tcp,
+    validate_mode, ws_probe_totals, BatchWritePartialError, BatchWriteReport, BatcherCloseError,
     BatcherCloseReport, RetryPolicy, TaosClient, TaosConfig, TaosConfigBuilder, TaosError,
     TaosExecResult, TaosHealth, TaosMetricsSnapshot, TaosPoint, TaosPool, TaosPoolStats,
     TaosQueryStream, TaosResult, TransportMode, TsPrecision, WriteBatcher, WriteBatcherConfig,
@@ -68,14 +68,28 @@ fn hard_limits_are_documented_and_ordered() {
     assert_eq!(HARD_MAX_QUERY_ROWS, 100_000);
     assert_eq!(HARD_MAX_CLOSE_TIMEOUT, Duration::from_secs(30));
 
-    // 常量被真实引用（black_box 避免 clippy::assertions_on_constants）。
-    let aggregate = HARD_MAX_IN_FLIGHT
-        + HARD_MAX_BATCH_ROWS
-        + HARD_MAX_BATCH_BYTES
-        + HARD_MAX_RESPONSE_BYTES
-        + HARD_MAX_QUERY_ROWS
-        + HARD_MAX_CLOSE_TIMEOUT.as_millis() as usize;
-    assert!(std::hint::black_box(aggregate) > 1_000);
+    // 常量被真实引用，且断言其间的秩序关系（black_box 避免 clippy::assertions_on_constants）。
+    // 原「求和 > 1_000」为重言式（各常量已在上方逐一钉死，求和不可能小于该值），
+    // 现改为有鉴别力的关系断言：未来调整任一上限破坏秩序时用例变红。
+    let (in_flight, batch_rows, batch_bytes, response_bytes, query_rows, close_ms) =
+        std::hint::black_box((
+            HARD_MAX_IN_FLIGHT,
+            HARD_MAX_BATCH_ROWS,
+            HARD_MAX_BATCH_BYTES,
+            HARD_MAX_RESPONSE_BYTES,
+            HARD_MAX_QUERY_ROWS,
+            HARD_MAX_CLOSE_TIMEOUT.as_millis() as usize,
+        ));
+    assert!(in_flight > 0, "并发硬上限必须为正");
+    assert!(
+        batch_rows <= query_rows,
+        "单批行数上限（{batch_rows}）不得超过单次查询行数上限（{query_rows}）"
+    );
+    assert!(
+        batch_bytes < response_bytes,
+        "单批字节上限（{batch_bytes}）必须小于响应字节上限（{response_bytes}）"
+    );
+    assert!(close_ms > 0, "关闭超时硬上限必须为正");
 }
 
 #[test]
@@ -138,14 +152,38 @@ fn free_functions_are_reachable_from_crate_root() {
     assert!(build_insert_sql_chunks("ticks", &[], TsPrecision::Ms, 10)
         .expect("空输入")
         .is_empty());
-    let _totals: (u64, u64) = ws_probe_totals();
-
-    // 函数指针与异步签名可绑定（编译期契约）。
+    // 函数指针与异步签名可绑定（编译期契约）。ws_probe_totals 的数值校验
+    // 由独立异步用例 ws_probe_totals_counts_failed_probe 承担（需触发真实探测）。
     let _ = build_native_ws_url;
     let _ = validate_mode;
     let _ = exec_sql_ws;
     let _ = probe_native_tcp;
     let _ = build_insert_sql_chunks;
+    let _ = ws_probe_totals;
+}
+
+/// `ws_probe_totals` 数值校验：失败的 WS 握手探测必须计入 err（恰好 +1），
+/// 且不得污染 ok 计数。本二进制内无其他用例会触发 ws 探测计数，
+/// 故可使用严格相等断言。
+#[tokio::test]
+async fn ws_probe_totals_counts_failed_probe() {
+    let (ok_before, err_before) = ws_probe_totals();
+    let config = TaosConfig {
+        host: "127.0.0.1".to_owned(),
+        port: 1, // 端口 1 无监听者，握手必然失败
+        transport: TransportMode::NativeWs,
+        timeout: Duration::from_millis(300),
+        acquire_timeout: Duration::from_millis(300),
+        ..TaosConfig::default()
+    };
+    let error = connect_native_ws(&config)
+        .await
+        .expect_err("不可达地址的 WS 握手必须失败");
+    assert!(error.is_retryable(), "{error:?}");
+
+    let (ok_after, err_after) = ws_probe_totals();
+    assert_eq!(ok_after, ok_before, "失败探测不得计入 ok");
+    assert_eq!(err_after, err_before + 1, "失败探测必须计入 err");
 }
 
 #[test]

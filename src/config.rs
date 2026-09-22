@@ -93,6 +93,13 @@ pub const HARD_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 pub const HARD_MAX_QUERY_ROWS: usize = 100_000;
 /// 关闭排空允许配置的最长时间。
 pub const HARD_MAX_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 请求超时（`timeout` / `acquire_timeout`）允许配置的最长时间。
+///
+/// 毫秒字段解析（`de_millis`）对 `u64::MAX` 等极端取值会饱和为
+/// [`Duration::MAX`]，本上限在 [`TaosConfig::validate`] 中兜底 fail-fast。
+pub const HARD_MAX_TIMEOUT: Duration = Duration::from_secs(3_600);
+/// 幂等写允许配置的最大重试次数（含首次）。
+pub const HARD_MAX_WRITE_MAX_ATTEMPTS: u32 = 10;
 /// SQL 标识符（库名 / 子表名）允许的最大 UTF-8 字节数。
 ///
 /// 库名校验与 `client` 模块的标识符校验共用同一上界，避免两处校验逻辑漂移。
@@ -240,11 +247,21 @@ impl TaosConfig {
         }
 
         if let Some(password) = root.remove("password") {
-            let password = password.as_str().unwrap_or("非字符串");
-            if !password.is_empty() {
-                return Err(TaosError::Config(
-                    "TOML 禁止非空 password 字段，请改用环境变量注入".to_owned(),
-                ));
+            match password.as_str() {
+                // 空字符串占位放行（表示密码走环境变量注入）。
+                Some("") => {}
+                Some(_) => {
+                    return Err(TaosError::Config(
+                        "TOML 禁止非空 password 字段，请改用环境变量注入".to_owned(),
+                    ));
+                }
+                // 非字符串类型：只揭示类型问题，不回显取值内容。
+                None => {
+                    return Err(TaosError::Config(
+                        "TOML password 必须为字符串类型；禁止非空 password 字段，请改用环境变量注入"
+                            .to_owned(),
+                    ));
+                }
             }
         }
 
@@ -321,6 +338,18 @@ impl TaosConfig {
                 HARD_MAX_CLOSE_TIMEOUT, self.close_timeout
             )));
         }
+        if self.timeout > HARD_MAX_TIMEOUT {
+            return Err(TaosError::Config(format!(
+                "timeout 超过上限 {:.0?}（当前 {:.0?}）",
+                HARD_MAX_TIMEOUT, self.timeout
+            )));
+        }
+        if self.acquire_timeout > HARD_MAX_TIMEOUT {
+            return Err(TaosError::Config(format!(
+                "acquire_timeout 超过上限 {:.0?}（当前 {:.0?}）",
+                HARD_MAX_TIMEOUT, self.acquire_timeout
+            )));
+        }
         if !valid_host(&self.host) || self.port == 0 {
             return Err(TaosError::Config("host/port 非法".to_owned()));
         }
@@ -331,6 +360,12 @@ impl TaosConfig {
         }
         if self.write_max_attempts == 0 {
             return Err(TaosError::Config("write_max_attempts 必须 ≥ 1".to_owned()));
+        }
+        if self.write_max_attempts > HARD_MAX_WRITE_MAX_ATTEMPTS {
+            return Err(TaosError::Config(format!(
+                "write_max_attempts 必须为 1..={HARD_MAX_WRITE_MAX_ATTEMPTS}（当前 {}）",
+                self.write_max_attempts
+            )));
         }
         if !self.database.is_empty() && !valid_ident(&self.database) {
             return Err(TaosError::Config("database 标识符非法".to_owned()));
@@ -759,5 +794,112 @@ write_max_attempts = 3
             msg.contains(&HARD_MAX_CLOSE_TIMEOUT.as_secs().to_string()),
             "错误消息必须引用 HARD_MAX_CLOSE_TIMEOUT 实际值而非硬编码: {msg}"
         );
+    }
+
+    /// P2-1: timeout / acquire_timeout 超过 HARD_MAX_TIMEOUT 必须 fail-fast，
+    /// 错误消息模式对齐 close_timeout 分支（含字段名、上限与实际值）。
+    #[test]
+    fn timeout_over_hard_max_reports_upper_bound() {
+        let over_timeout = TaosConfig {
+            timeout: HARD_MAX_TIMEOUT + Duration::from_millis(1),
+            ..Default::default()
+        };
+        let error = over_timeout.validate().expect_err("超限 timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("timeout 超过上限"),
+            "错误消息必须包含「timeout 超过上限」: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{:.0?}", HARD_MAX_TIMEOUT)),
+            "错误消息必须引用 HARD_MAX_TIMEOUT 实际值: {msg}"
+        );
+
+        let over_acquire = TaosConfig {
+            acquire_timeout: HARD_MAX_TIMEOUT + Duration::from_millis(1),
+            ..Default::default()
+        };
+        let error = over_acquire
+            .validate()
+            .expect_err("超限 acquire_timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("acquire_timeout 超过上限"),
+            "错误消息必须包含「acquire_timeout 超过上限」: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{:.0?}", HARD_MAX_TIMEOUT)),
+            "错误消息必须引用 HARD_MAX_TIMEOUT 实际值: {msg}"
+        );
+
+        // 恰好等于上限必须放行（边界不误伤）。
+        let at_limit = TaosConfig {
+            timeout: HARD_MAX_TIMEOUT,
+            acquire_timeout: HARD_MAX_TIMEOUT,
+            ..Default::default()
+        };
+        at_limit.validate().expect("等于上限必须通过");
+    }
+
+    /// P2-2: write_max_attempts 超过 HARD_MAX_WRITE_MAX_ATTEMPTS 必须 fail-fast，
+    /// 错误消息含字段名与上限值。
+    #[test]
+    fn write_max_attempts_over_hard_max_reports_upper_bound() {
+        let config = TaosConfig {
+            write_max_attempts: HARD_MAX_WRITE_MAX_ATTEMPTS + 1,
+            ..Default::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("超限 write_max_attempts 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("write_max_attempts"),
+            "错误消息必须包含字段名 'write_max_attempts': {msg}"
+        );
+        assert!(
+            msg.contains(&HARD_MAX_WRITE_MAX_ATTEMPTS.to_string()),
+            "错误消息必须引用 HARD_MAX_WRITE_MAX_ATTEMPTS 实际值: {msg}"
+        );
+
+        // 恰好等于上限必须放行（边界不误伤）。
+        let at_limit = TaosConfig {
+            write_max_attempts: HARD_MAX_WRITE_MAX_ATTEMPTS,
+            ..Default::default()
+        };
+        at_limit.validate().expect("等于上限必须通过");
+    }
+
+    /// P2-5: TOML password 为非字符串类型时，错误消息必须揭示类型问题，
+    /// 且不泄漏取值内容。
+    #[test]
+    fn toml_non_string_password_message_reveals_type_issue() {
+        let error = TaosConfig::from_toml("schema_version = 1\npassword = 12345\n")
+            .expect_err("整数类型 password 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("字符串"),
+            "错误消息必须揭示类型问题（含「字符串」）: {msg}"
+        );
+        assert!(
+            msg.contains("password"),
+            "错误消息必须包含字段名 'password': {msg}"
+        );
+        assert!(!msg.contains("12345"), "错误消息不得泄漏取值内容: {msg}");
+
+        // 布尔类型同样按类型问题拒绝。
+        let error = TaosConfig::from_toml("schema_version = 1\npassword = true\n")
+            .expect_err("布尔类型 password 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("字符串"),
+            "错误消息必须揭示类型问题（含「字符串」）: {msg}"
+        );
+        assert!(!msg.contains("true"), "错误消息不得泄漏取值内容: {msg}");
+
+        // 空字符串 password 仍然放行（既有语义不变）。
+        let config = TaosConfig::from_toml("schema_version = 1\npassword = \"\"\n")
+            .expect("空字符串 password 必须放行");
+        assert!(config.password.is_empty());
     }
 }

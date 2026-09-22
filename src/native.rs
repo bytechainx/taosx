@@ -12,6 +12,8 @@
 
 use futures_util::{SinkExt, Stream, StreamExt};
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tracing::debug;
 
@@ -75,6 +77,20 @@ pub async fn connect_native_ws(config: &TaosConfig) -> TaosResult<()> {
     result
 }
 
+/// 由 `max_response_bytes` 构造 WS 客户端配置（纯函数）。
+///
+/// WS 路径与 REST 路径共用同一响应体积限额策略：帧与消息上限均绑定
+/// `config.max_response_bytes`，防止服务端超大帧导致无界内存放大。
+/// 仅供 [`exec_sql_ws`]（需要读取数据帧）使用；[`connect_native_ws`] 只做
+/// 握手探测、不读数据帧，保持默认配置。
+fn ws_config_from(config: &TaosConfig) -> WebSocketConfig {
+    // WebSocketConfig 为 #[non_exhaustive]，跨 crate 须经 default() 后赋值字段。
+    let mut ws_config = WebSocketConfig::default();
+    ws_config.max_frame_size = Some(config.max_response_bytes);
+    ws_config.max_message_size = Some(config.max_response_bytes);
+    ws_config
+}
+
 /// 短会话 WS SQL：连接 `/rest/ws`，先 `conn` 建会话，再发 `query`，返回其响应帧。
 ///
 /// 协议（阶段 1 的两步）：
@@ -93,6 +109,9 @@ pub async fn connect_native_ws(config: &TaosConfig) -> TaosResult<()> {
 /// 服务端结构化 `message` 文本不入错误消息（与 REST 路径同一口径：只保留错误码，
 /// 避免第三方文本或凭据随日志外泄）。
 ///
+/// WS 帧/消息大小上限与 `config.max_response_bytes` 联动（见 [`ws_config_from`]），
+/// 与 REST 路径的响应限额策略一致；超限帧由底层直接报错而非静默截断。
+///
 /// **边界**：返回值是 `query` 的**元数据响应帧**，**不含结果行**——结果行需在 `query`
 /// 之后另发 `fetch`，本阶段未实现。协议细节随服务端版本而异。
 pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
@@ -101,8 +120,9 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
         return Err(TaosError::Invalid("exec_sql_ws: 空 SQL".to_owned()));
     }
     let url = build_native_ws_url(config);
+    let ws_config = ws_config_from(config);
     let attempt = async {
-        let (mut socket, _response) = connect_async(&url)
+        let (mut socket, _response) = connect_async_with_config(&url, Some(ws_config), false)
             .await
             .map_err(|error| TaosError::Unavailable(format!("ws 连接失败: {error}")))?;
 
@@ -134,7 +154,9 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
         let query_frame = read_frame(&mut socket).await?;
         ensure_code_zero(&query_frame, "query")?;
 
-        let _ = socket.close(None).await;
+        if let Err(error) = socket.close(None).await {
+            debug!(target: "taosx", %error, "ws 关闭失败（响应已获取，不影响正确性）");
+        }
         Ok(query_frame)
     };
     match tokio::time::timeout(config.timeout, attempt).await {
@@ -424,5 +446,16 @@ mod tests {
             parse_status_code(&payload).is_err(),
             "非法 UTF-8 不得被当作成功"
         );
+    }
+
+    #[test]
+    fn ws_config_links_max_response_bytes() {
+        let config = TaosConfig {
+            max_response_bytes: 1234,
+            ..TaosConfig::default()
+        };
+        let ws = ws_config_from(&config);
+        assert_eq!(ws.max_frame_size, Some(1234), "帧上限必须联动配置");
+        assert_eq!(ws.max_message_size, Some(1234), "消息上限必须联动配置");
     }
 }

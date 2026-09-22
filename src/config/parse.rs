@@ -13,6 +13,9 @@ use crate::error::{TaosError, TaosResult};
 use super::{TransportMode, TsPrecision, MAX_IDENT_BYTES};
 
 /// TOML 中毫秒字段（`timeout_ms` 等）的解析器。
+///
+/// 注意：`u64::MAX` 毫秒等极端取值会饱和为 [`Duration::MAX`]，
+/// 由 `validate` 的 [`crate::config::HARD_MAX_TIMEOUT`] 上界校验兜底 fail-fast。
 pub(super) fn de_millis<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -61,17 +64,23 @@ pub(super) fn env_trimmed(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// 读取并解析环境变量；解析失败只报告变量名，不回显取值。
+/// 读取并解析环境变量；trim 后为空视为未设置，返回 `Ok(None)`，
+/// 对齐 [`env_non_empty`] / [`env_trimmed`] 语义；非空但解析失败只报告变量名，不回显取值。
 pub(super) fn env_parsed<T>(name: &str) -> TaosResult<Option<T>>
 where
     T: std::str::FromStr,
 {
     match std::env::var(name) {
-        Ok(value) => value
-            .trim()
-            .parse::<T>()
-            .map(Some)
-            .map_err(|_| TaosError::Config(format!("环境变量 {name} 取值非法"))),
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+                .parse::<T>()
+                .map(Some)
+                .map_err(|_| TaosError::Config(format!("环境变量 {name} 取值非法")))
+        }
         Err(_) => Ok(None),
     }
 }
@@ -146,5 +155,47 @@ pub(super) fn url_host(host: &str) -> String {
         host.to_string()
     } else {
         format!("[{host}]")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P2-4: 空字符串取值视为未设置，返回 Ok(None)，对齐 env_non_empty 语义。
+    #[test]
+    fn env_parsed_empty_value_returns_none() {
+        let name = "FOUNDATIONX_TAOSX_TEST_ENV_PARSED_EMPTY";
+        std::env::set_var(name, "");
+        let result = env_parsed::<u64>(name).expect("空取值不得报错");
+        std::env::remove_var(name);
+        assert_eq!(result, None, "空字符串必须返回 None 而非解析失败");
+    }
+
+    /// P2-4: trim 后为空的取值同样视为未设置，返回 Ok(None)。
+    #[test]
+    fn env_parsed_whitespace_value_returns_none() {
+        let name = "FOUNDATIONX_TAOSX_TEST_ENV_PARSED_BLANK";
+        std::env::set_var(name, "   ");
+        let result = env_parsed::<u64>(name).expect("空白取值不得报错");
+        std::env::remove_var(name);
+        assert_eq!(result, None, "trim 后为空必须返回 None 而非解析失败");
+    }
+
+    /// P2-4: 非空但解析失败仍然报错，且只报告变量名、不回显取值。
+    #[test]
+    fn env_parsed_invalid_non_empty_value_still_errors() {
+        let name = "FOUNDATIONX_TAOSX_TEST_ENV_PARSED_INVALID";
+        std::env::set_var(name, "not-a-number");
+        let error = env_parsed::<u64>(name).expect_err("非法取值必须拒绝");
+        std::env::remove_var(name);
+        assert!(
+            error.to_string().contains(name),
+            "错误消息必须包含变量名: {error}"
+        );
+        assert!(
+            !error.to_string().contains("not-a-number"),
+            "错误消息不得回显取值: {error}"
+        );
     }
 }

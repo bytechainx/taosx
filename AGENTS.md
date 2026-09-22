@@ -52,11 +52,19 @@ src/
 
 ## 门禁（P0）
 
+与 `.github/workflows/ci.yml` 的 gate job 逐字一致（组织标准命令）：
+
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
+
+doc / deny 书面暂缓声明（组织 `ci.md` §1：fmt + clippy + test 不可豁免，doc/deny 可由项目声明暂缓）：
+
+- `cargo doc --workspace --no-deps --all-features`：**暂缓**。本仓库为单 crate 库，文档质量已由
+  `#![deny(missing_docs)]` 与 doctest 覆盖；独立 doc 构建门禁待与 `cargo deny` 一并评估引入。
+- `cargo deny check`：**暂缓**。仓库尚无 `deny.toml`，供应链审计计划 2026-12 前建立。
 
 热路径基准（离线，无需 TDengine 服务）：
 

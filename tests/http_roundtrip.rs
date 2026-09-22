@@ -11,7 +11,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use taosx::{TaosConfig, TaosPoint, TaosPool, TsPrecision, WriteBatcher, WriteBatcherConfig};
+use taosx::{
+    TaosConfig, TaosError, TaosPoint, TaosPool, TsPrecision, WriteBatcher, WriteBatcherConfig,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -25,6 +27,9 @@ const DESCRIBE_NCHAR: &str = concat!(
     r#""data":[["ts","TIMESTAMP","8"],["bid","NCHAR","64"],["ask","NCHAR","64"]],"rows":3}"#
 );
 const INSERT_OK: &str = r#"{"code":0,"column_meta":[],"data":[],"rows":0,"affected_rows":1}"#;
+/// TDengine 896（服务端繁忙）：唯一可重试的业务码，用于驱动幂等写整批重试。
+const INSERT_BUSY_896: &str =
+    r#"{"code":896,"desc":"busy","column_meta":[],"data":[],"rows":0,"affected_rows":0}"#;
 const SELECT_TICKS: &str = concat!(
     r#"{"code":0,"column_meta":[["ts","TIMESTAMP",8],["bid","NCHAR",64],["ask","NCHAR",64],["symbol","NCHAR",16]],"#,
     r#""data":[[1700000000000,"66522.40","66523.10","BTC/USDT"],[1700000001000,"66524.00","66525.00","ETH/USDT"]],"rows":2}"#
@@ -200,12 +205,63 @@ async fn write_batch_ensures_stable_then_inserts_chunks() {
     assert!(metrics.response_bytes > 0);
     assert!(pool.metrics_prometheus().contains("taosx_bytes_total"));
 
-    // 幂等写路径（`write_max_attempts = 1` 时等价单次尝试）。
+    // 非法表名在构建 SQL 前被本地白名单拒绝：不可重试，且不发出任何 HTTP 请求。
     let error = pool
         .write_batch("bad table", &sample_points())
         .await
         .expect_err("非法表名");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
     assert!(!error.is_retryable());
+    assert_eq!(mock.request_count(), 6, "本地拒绝不得触达网络");
+}
+
+/// 幂等写直接测试：`write_batch_idempotent` 对可重试错误（896 繁忙）按
+/// `write_max_attempts` 整批重试直至成功；对不可重试错误立即失败、不重试。
+#[tokio::test]
+async fn write_batch_idempotent_retries_retryable_error_then_succeeds() {
+    let mock = MockTaos::start(vec![
+        OK_EMPTY,        // CREATE DATABASE（connect）
+        PRECISION_MS,    // 精度探测（connect）
+        PING_OK,         // ping（connect）
+        OK_EMPTY,        // 第 1 次尝试：CREATE STABLE
+        DESCRIBE_NCHAR,  // 第 1 次尝试：DESCRIBE
+        INSERT_BUSY_896, // 第 1 次尝试：INSERT 返回 896（可重试）
+        OK_EMPTY,        // 第 2 次尝试：CREATE STABLE
+        DESCRIBE_NCHAR,  // 第 2 次尝试：DESCRIBE
+        INSERT_OK,       // 第 2 次尝试：INSERT 成功
+    ])
+    .await;
+    let pool = TaosPool::connect(TaosConfig {
+        write_max_attempts: 3,
+        ..config_for(mock.port)
+    })
+    .await
+    .expect("连接成功");
+
+    let report = pool
+        .write_batch_idempotent("ticks", &sample_points())
+        .await
+        .expect("896 后整批重试必须最终成功");
+    assert_eq!(report.accepted, 2);
+    assert_eq!(report.failed, 0);
+    assert_eq!(report.chunks_ok, 1);
+    assert_eq!(report.chunks_total, 1);
+    assert!(report.is_complete());
+    // connect 3 次 + 两轮（CREATE + DESCRIBE + INSERT）各 3 次 = 9，证明发生了整批重试。
+    assert_eq!(mock.request_count(), 9, "可重试错误必须触发第二轮整批请求");
+    assert!(
+        mock.request_text(5).contains("INSERT INTO "),
+        "第 6 条请求应为首次 INSERT"
+    );
+
+    // 不可重试错误：立即失败，不消耗额外请求额度。
+    let error = pool
+        .write_batch_idempotent("bad table", &sample_points())
+        .await
+        .expect_err("非法表名必须立即失败");
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    assert!(!error.is_retryable(), "非法表名不可重试");
+    assert_eq!(mock.request_count(), 9, "不可重试错误不得触发重试请求");
 }
 
 #[tokio::test]
@@ -246,10 +302,12 @@ async fn query_series_and_stream_return_typed_points() {
         tags.push(item.expect("行必须 Ok").tag_value);
     }
     assert_eq!(tags, vec!["BTC/USDT".to_owned(), "ETH/USDT".to_owned()]);
-    assert!(pool
-        .query_series_stream_chunked("ticks", 0, 1, 0)
-        .await
-        .is_err());
+    // TaosQueryStream 未实现 Debug，无法用 expect_err，改 match 提取错误。
+    let error = match pool.query_series_stream_chunked("ticks", 0, 1, 0).await {
+        Err(error) => error,
+        Ok(_) => panic!("chunk_hint = 0 必须拒绝"),
+    };
+    assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
 }
 
 #[tokio::test]
@@ -282,8 +340,10 @@ async fn write_batcher_flushes_and_closes_through_pool() {
     assert_eq!(summary.total_failed, 0);
     assert_eq!(summary.pending, 0);
     assert!(summary.last_flush.is_complete());
-    assert!(
-        batcher.push(sample_points().remove(0)).await.is_err(),
-        "关闭后 push 必须拒绝"
-    );
+    let error = batcher
+        .push(sample_points().remove(0))
+        .await
+        .expect_err("关闭后 push 必须拒绝");
+    assert!(matches!(error, TaosError::Closed(_)), "{error:?}");
+    assert!(!error.is_retryable(), "已关闭不可重试");
 }

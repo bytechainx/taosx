@@ -171,6 +171,11 @@ pub(super) fn truncate(text: &str, max: usize) -> String {
 }
 
 /// JSON 单元格 → 字符串（保持调用方原始文本表示）。
+///
+/// 前瞻性局限（P2-8）：`serde_json::Number` 的 `to_string` 对 f64 可能产生
+/// 科学记数法表示（如极大/极小浮点值）。当前 TDengine REST 以 string 形式
+/// 返回数值单元格，故实际路径不受影响；整数（i64/u64）无精度损失。
+/// 若未来服务端改为原生 JSON number 返回浮点，需重新评估此表示。
 fn json_cell_to_string(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => String::new(),
@@ -178,5 +183,45 @@ fn json_cell_to_string(value: &serde_json::Value) -> String {
         serde_json::Value::Bool(flag) => flag.to_string(),
         serde_json::Value::Number(number) => number.to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_cell_to_string;
+
+    /// P2-8：锁定 i64/u64 大值经 `json_cell_to_string` 无精度损失。
+    #[test]
+    fn large_integers_round_trip_without_precision_loss() {
+        assert_eq!(
+            json_cell_to_string(&serde_json::json!(i64::MAX)),
+            "9223372036854775807"
+        );
+        assert_eq!(
+            json_cell_to_string(&serde_json::json!(i64::MIN)),
+            "-9223372036854775808"
+        );
+        assert_eq!(
+            json_cell_to_string(&serde_json::json!(u64::MAX)),
+            "18446744073709551615"
+        );
+    }
+
+    /// P2-8：锁定 f64 输出符合 serde_json 默认表示（1.5 不产生科学记数法）。
+    #[test]
+    fn f64_uses_serde_json_default_representation() {
+        assert_eq!(json_cell_to_string(&serde_json::json!(1.5)), "1.5");
+        // serde_json 对 f64 采用最短往返表示；极大值会进入科学记数法（`1e+300`）——
+        // 此为已知前瞻性局限（见 `json_cell_to_string` 文档），当前 REST
+        // 以 string 返回数值单元格，实际路径不受影响。
+        assert_eq!(json_cell_to_string(&serde_json::json!(1e300)), "1e+300");
+    }
+
+    /// P2-8：其余单元格类型保持既有行为（string 原文、null 空串、bool 小写）。
+    #[test]
+    fn other_cell_kinds_keep_existing_behavior() {
+        assert_eq!(json_cell_to_string(&serde_json::json!("1.0")), "1.0");
+        assert_eq!(json_cell_to_string(&serde_json::Value::Null), "");
+        assert_eq!(json_cell_to_string(&serde_json::json!(true)), "true");
     }
 }

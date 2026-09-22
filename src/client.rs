@@ -46,20 +46,25 @@ const CLOSED_BIT: usize = 1usize << (usize::BITS - 1);
 /// in-flight 计数掩码（`state` 低位）。
 const IN_FLIGHT_MASK: usize = !CLOSED_BIT;
 
-/// 构建 HTTP 客户端（超时、连接池、禁用重定向、可选私有 CA）。
-fn build_http_client(config: &TaosConfig) -> TaosResult<reqwest::Client> {
+/// CA 文件读取失败 → 配置错误（同步/异步路径共用消息）。
+fn tls_ca_read_error(path: &std::path::Path, error: std::io::Error) -> TaosError {
+    TaosError::Config(format!(
+        "无法读取 TLS CA `{}`（{}）",
+        path.display(),
+        error.kind()
+    ))
+}
+
+/// HTTP 客户端唯一装配点（同步/异步构建路径共享，W-1）；`ca_pem` 为已读取的 CA 内容。
+fn assemble_http_client(
+    config: &TaosConfig,
+    ca_pem: Option<Vec<u8>>,
+) -> TaosResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .timeout(config.timeout)
         .pool_max_idle_per_host(8)
         .redirect(reqwest::redirect::Policy::none());
-    if let Some(path) = &config.tls_ca_file {
-        let pem = std::fs::read(path).map_err(|error| {
-            TaosError::Config(format!(
-                "无法读取 TLS CA `{}`（{}）",
-                path.display(),
-                error.kind()
-            ))
-        })?;
+    if let Some(pem) = ca_pem {
         let certificate = reqwest::Certificate::from_pem(&pem)
             .map_err(|error| TaosError::Config(format!("TLS CA 不是合法 PEM（{error}）")))?;
         builder = builder.add_root_certificate(certificate);
@@ -67,6 +72,31 @@ fn build_http_client(config: &TaosConfig) -> TaosResult<reqwest::Client> {
     builder
         .build()
         .map_err(|error| TaosError::Config(format!("HTTP 客户端构建失败（{error}）")))
+}
+
+/// 构建 HTTP 客户端（同步路径：`std::fs` 读 CA，供 [`TaosPool::new`] 使用）。
+fn build_http_client(config: &TaosConfig) -> TaosResult<reqwest::Client> {
+    let ca_pem = match &config.tls_ca_file {
+        Some(path) => Some(std::fs::read(path).map_err(|error| tls_ca_read_error(path, error))?),
+        None => None,
+    };
+    assemble_http_client(config, ca_pem)
+}
+
+/// 构建 HTTP 客户端（异步路径：CA 读取移入 `spawn_blocking`，R-RT-010）。
+/// tokio 未启用 `fs` feature 且 Cargo.toml 为共享互斥资源，故不用 `tokio::fs`。
+async fn build_http_client_async(config: &TaosConfig) -> TaosResult<reqwest::Client> {
+    let ca_pem = match &config.tls_ca_file {
+        Some(path) => {
+            let owned = path.clone();
+            let read = tokio::task::spawn_blocking(move || std::fs::read(&owned))
+                .await
+                .map_err(|error| TaosError::Io(std::io::Error::other(error)))?;
+            Some(read.map_err(|error| tls_ca_read_error(path, error))?)
+        }
+        None => None,
+    };
+    assemble_http_client(config, ca_pem)
 }
 
 /// TDengine REST 客户端与连接池（`TaosClient` 是其别名）。
@@ -643,6 +673,58 @@ mod tests {
             .await
             .expect_err("精度不一致必须 fail-closed");
         assert!(matches!(error, TaosError::Config(_)));
+    }
+
+    /// P2-7（A 案）：async 构造对不可读 CA 返回 Config 错误；成功路径由既有 connect 系列测试覆盖。
+    #[tokio::test]
+    async fn new_async_rejects_unreadable_tls_ca() {
+        let config = TaosConfig {
+            tls: true,
+            tls_ca_file: Some(std::path::PathBuf::from("/nonexistent/ca.pem")),
+            ..TaosConfig::default()
+        };
+        let error = TaosPool::new_async(config)
+            .await
+            .expect_err("不可读 CA 必须失败");
+        assert!(matches!(error, TaosError::Config(_)), "{error:?}");
+    }
+
+    /// P2-9（C 案）：正文非空时错误消息仍维持占位符，正文只进 debug 日志（标准 §4）。
+    #[tokio::test]
+    async fn http_error_body_never_enters_message() {
+        let port = serve_response("401 Unauthorized", "password=leak-me", false).await;
+        let error = pool_with_port(port)
+            .exec("SELECT 1")
+            .await
+            .expect_err("401 必须报错");
+        assert!(matches!(error, TaosError::Backend { .. }), "{error:?}");
+        assert!(error.to_string().contains("响应正文已省略"), "{error}");
+        assert!(!error.to_string().contains("leak-me"), "{error}");
+    }
+
+    /// P2-9（C 案）：正文为空/全空白时同样维持占位符。
+    #[tokio::test]
+    async fn http_error_blank_body_keeps_placeholder() {
+        let port = serve_response("500 Internal Server Error", "   ", false).await;
+        let error = pool_with_port(port)
+            .exec("SELECT 1")
+            .await
+            .expect_err("500 必须报错");
+        assert!(matches!(error, TaosError::Unavailable(_)), "{error:?}");
+        assert!(error.to_string().contains("响应正文已省略"), "{error}");
+    }
+
+    /// P2-9（C 案）：超长正文也不得进入错误消息（截断只发生在 debug 日志侧）。
+    #[tokio::test]
+    async fn http_error_long_body_keeps_placeholder() {
+        let body: &'static str = Box::leak("diagnostic-line ".repeat(50).into_boxed_str());
+        let port = serve_response("503 Service Unavailable", body, false).await;
+        let error = pool_with_port(port)
+            .exec("SELECT 1")
+            .await
+            .expect_err("503 必须报错");
+        assert!(error.to_string().contains("响应正文已省略"), "{error}");
+        assert!(!error.to_string().contains("diagnostic-line"), "{error}");
     }
 
     /// P1-3: `detect_precision` 的 SQL 必须通过 `escape_str` 转义 database 名（脆断耦合修复）。
