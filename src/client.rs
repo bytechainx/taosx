@@ -122,7 +122,8 @@ pub type TaosClient = TaosPool;
 mod tests {
     use super::response::{parse_ts_cell, truncate};
     use super::sql::{
-        build_insert_sql_chunks_with_limits, encode_timestamp, subtable_name, MAX_SYMBOL_BYTES,
+        build_insert_sql_chunks_with_limits, encode_timestamp, escape_str, subtable_name,
+        MAX_SYMBOL_BYTES,
     };
     use super::*;
     use crate::config::HARD_MAX_BATCH_ROWS;
@@ -642,5 +643,68 @@ mod tests {
             .await
             .expect_err("精度不一致必须 fail-closed");
         assert!(matches!(error, TaosError::Config(_)));
+    }
+
+    /// P1-3: `detect_precision` 的 SQL 必须通过 `escape_str` 转义 database 名（脆断耦合修复）。
+    #[tokio::test]
+    async fn detect_precision_uses_escaped_database_name() {
+        use std::sync::{Arc, Mutex};
+
+        // 启动 mock 服务器，捕获 detect_precision 请求（第二个请求）的 SQL 正文。
+        let captured_sql = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&captured_sql);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+
+        tokio::spawn(async move {
+            let bodies = [
+                r#"{"code":0,"column_meta":[],"data":[],"rows":0}"#, // CREATE DATABASE
+                r#"{"code":0,"column_meta":[["precision","VARCHAR",8]],"data":[["ms"]],"rows":1}"#, // detect_precision
+                r#"{"code":0,"column_meta":[["v","VARCHAR",32]],"data":[["3.3.6.13"]],"rows":1}"#, // ping
+            ];
+
+            for (i, body) in bodies.iter().enumerate() {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).await.expect("read");
+                let request = String::from_utf8_lossy(&buf[..n]);
+                // 捕获第二个请求（detect_precision）的 SQL 正文。
+                if i == 1 {
+                    if let Some(body_start) = request.find("\r\n\r\n") {
+                        let sql_body = request[body_start + 4..].trim().to_string();
+                        *captured.lock().unwrap() = sql_body;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.expect("write");
+            }
+        });
+
+        let config = TaosConfig {
+            port,
+            database: "test_db".into(),
+            timeout: Duration::from_secs(2),
+            ..TaosConfig::default()
+        };
+
+        let _pool = TaosPool::connect(config).await.expect("connect");
+
+        // 验证 SQL 正文包含转义后的 database 名（而非原始值直接拼接）。
+        let sql_body = captured_sql.lock().unwrap();
+        let escaped = escape_str("test_db");
+        let expected_pattern = format!("name='{escaped}'");
+        assert!(
+            sql_body.contains(&expected_pattern),
+            "detect_precision SQL 必须使用 escape_str 转义 database 名\n期望包含: {expected_pattern}\n实际: {sql_body}"
+        );
+        // 确保 SQL 中 database 名不在未转义上下文中直拼。
+        assert!(
+            !sql_body.contains("name='test_db'") || escaped == "test_db",
+            "未转义的 database 名不得直接出现在 SQL 字面量中"
+        );
     }
 }

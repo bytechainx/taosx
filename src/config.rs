@@ -297,14 +297,29 @@ impl TaosConfig {
                 "max_query_rows 必须为 1..={HARD_MAX_QUERY_ROWS}"
             )));
         }
-        if self.timeout.is_zero()
-            || self.acquire_timeout.is_zero()
-            || self.close_timeout.is_zero()
-            || self.close_timeout > HARD_MAX_CLOSE_TIMEOUT
-        {
-            return Err(TaosError::Config(
-                "timeout 必须大于零且 close_timeout 不超过 30 秒".to_owned(),
-            ));
+        if self.timeout.is_zero() {
+            return Err(TaosError::Config(format!(
+                "timeout 必须大于 0（当前 {:.0?}）",
+                self.timeout
+            )));
+        }
+        if self.acquire_timeout.is_zero() {
+            return Err(TaosError::Config(format!(
+                "acquire_timeout 必须大于 0（当前 {:.0?}）",
+                self.acquire_timeout
+            )));
+        }
+        if self.close_timeout.is_zero() {
+            return Err(TaosError::Config(format!(
+                "close_timeout 必须大于 0（当前 {:.0?}）",
+                self.close_timeout
+            )));
+        }
+        if self.close_timeout > HARD_MAX_CLOSE_TIMEOUT {
+            return Err(TaosError::Config(format!(
+                "close_timeout 超过上限 {:.0?}（当前 {:.0?}）",
+                HARD_MAX_CLOSE_TIMEOUT, self.close_timeout
+            )));
         }
         if !valid_host(&self.host) || self.port == 0 {
             return Err(TaosError::Config("host/port 非法".to_owned()));
@@ -685,5 +700,64 @@ write_max_attempts = 3
             std::env::temp_dir().join(format!("taosx-missing-{}.toml", std::process::id()));
         let error = TaosConfig::from_toml_file(&missing).expect_err("缺失文件必须拒绝");
         assert!(error.to_string().contains("TOML 文件读取失败"));
+    }
+
+    /// P1-1: 每条 timeout 校验错误必须包含字段名、实际值与允许范围（修复前合并为模糊消息）。
+    #[test]
+    fn timeout_validation_errors_include_field_name_and_range() {
+        let zero_timeout = TaosConfig {
+            timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        let error = zero_timeout.validate().expect_err("零 timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("timeout"),
+            "错误消息必须包含字段名 'timeout': {msg}"
+        );
+
+        let zero_acquire = TaosConfig {
+            acquire_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        let error = zero_acquire
+            .validate()
+            .expect_err("零 acquire_timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("acquire_timeout"),
+            "错误消息必须包含字段名 'acquire_timeout': {msg}"
+        );
+
+        let zero_close = TaosConfig {
+            close_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        let error = zero_close
+            .validate()
+            .expect_err("零 close_timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("close_timeout"),
+            "错误消息必须包含字段名 'close_timeout': {msg}"
+        );
+
+        let over_close = TaosConfig {
+            close_timeout: HARD_MAX_CLOSE_TIMEOUT + Duration::from_secs(1),
+            ..Default::default()
+        };
+        let error = over_close
+            .validate()
+            .expect_err("超限 close_timeout 必须拒绝");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("close_timeout"),
+            "错误消息必须包含字段名 'close_timeout': {msg}"
+        );
+        // 错误消息必须引用 HARD_MAX_CLOSE_TIMEOUT 常量值而非硬编码 "30 秒"。
+        assert!(
+            msg.contains(&HARD_MAX_CLOSE_TIMEOUT.as_secs().to_string()),
+            "错误消息必须引用 HARD_MAX_CLOSE_TIMEOUT 实际值而非硬编码: {msg}"
+        );
     }
 }

@@ -159,7 +159,11 @@ impl TaosError {
             Self::Backend { code, .. } => Self::Backend { code, message },
             Self::Unavailable(_) => Self::Unavailable(message),
             Self::Serialization(_) => Self::Serialization(message),
-            Self::Io(error) => Self::Io(error),
+            Self::Io(error) => {
+                // 保留原始 I/O 错误 kind，用新消息重建 io::Error。
+                let new_error = std::io::Error::new(error.kind(), message);
+                Self::Io(new_error)
+            }
             Self::Timeout(_) => Self::Timeout(message),
             Self::Invalid(_) => Self::Invalid(message),
             Self::Closed(_) => Self::Closed(message),
@@ -267,5 +271,40 @@ mod tests {
             Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof").into())
         }
         assert!(matches!(read(), Err(TaosError::Io(_))));
+    }
+
+    /// P1-2: `with_message` 对 `Io` 变体必须替换错误消息（修复前静默丢弃）。
+    #[test]
+    fn with_message_replaces_io_message() {
+        let original = TaosError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "连接被拒绝",
+        ));
+        let updated = original.with_message("补充 I/O 上下文");
+        let rendered = updated.to_string();
+        assert!(
+            rendered.contains("补充 I/O 上下文"),
+            "Io with_message 必须包含新消息，实际: {rendered}"
+        );
+        assert!(
+            !rendered.contains("连接被拒绝"),
+            "Io with_message 必须替换旧消息，实际: {rendered}"
+        );
+    }
+
+    /// P1-2 补充：Io with_message 保留原始错误 kind。
+    #[test]
+    fn with_message_io_preserves_error_kind() {
+        let original = TaosError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "超时"));
+        let updated = original.with_message("新上下文");
+        if let TaosError::Io(inner) = updated {
+            assert_eq!(
+                inner.kind(),
+                std::io::ErrorKind::TimedOut,
+                "Io with_message 必须保留原始错误 kind"
+            );
+        } else {
+            panic!("with_message 必须保持 Io 变体");
+        }
     }
 }

@@ -16,6 +16,28 @@
   不检查缓冲区，导致窗口内数据永久静默丢失。修复：`close()` 在释放锁之前先设置 `closing`
   标志；`push()` 与 `flush()` 检查 `closed || closing` 时拒绝操作（返回
   `TaosError::Closed`）。失败路径会清除 `closing` 以允许外部恢复后重试关闭。
+- **`with_message` 对 `Io` 变体静默丢弃上下文消息**（P1-2）：此前 `TaosError::with_message`
+  对其他 9 个变体均替换消息，唯独 `Io` 变体忽略调用方传入的上下文，文档承诺「替换错误消息」
+  与实现不一致。现改为保留原始 `std::io::Error` 的 `kind`，用新消息重建 `io::Error`。
+- **`validate()` 超时校验合并为同一条模糊错误消息**（P1-1）：此前 `timeout`、
+  `acquire_timeout`、`close_timeout` 的四条校验条件合并输出一条不含字段名的错误，
+  其余字段均有独立的「字段名+范围」消息。现拆分为四条独立错误，每条包含字段名、当前值
+  与允许范围；`close_timeout` 上限错误消息引用 `HARD_MAX_CLOSE_TIMEOUT` 常量而非
+  硬编码「30 秒」。
+- **`detect_precision` 的 database 名直拼 SQL 字面量位置**（P1-3）：此前 database 名
+  直接置于 `WHERE name='{database}'` 的单引号字面量位置，安全性仅依赖 `validate_ident`
+  白名单校验（脆断耦合——未来若放宽 `validate_ident` 即破坏转义假设）。现改为经
+  `escape_str` 转义后再拼入 SQL，与标识符校验解耦。
+
+### 测试
+
+- 补 `with_message` 对 `Io` 变体的两条单测（消息替换 + kind 保留）
+- 补 `validate()` 超时字段级错误消息的独立单测
+- 补 `detect_precision` 经 `escape_str` 转义 database 名的 HTTP 捕获回归测试
+- 补多主机 failover 成功路径离线 mock 测试（`tests/failover_success.rs`）：首 host 失败、
+  次 host 成功 + 多备用 host 两场景
+- 补原生 WebSocket 层离线 mock 三分支测试（`tests/ws_native_mock.rs`）：Text 帧、
+  Binary 帧解码、非数据帧 fail-closed、Ping 帧 fail-closed
 
 ## [0.1.4] - 2026-09-22
 
