@@ -154,7 +154,7 @@ async fn data_plane_roundtrip(pool: &TaosPool, stable: &str, tag: &str, timestam
 
 /// 主测：原生 TCP 端口可达 + 原生 WebSocket 握手 + 双传输池的数据面往返。
 #[tokio::test]
-#[ignore = "需要真实 TDengine（原生 6030 / taosAdapter 6041）与 FOUNDATIONX_TAOSX_* 环境变量"]
+#[ignore = "需要真实 TDengine（原生 6030 / taosAdapter 6041）与 FOUNDATIONX_TAOSX_* 环境变量; owner: g0-trust-runner; 期限: 2026-12 复查"]
 async fn live_taos_native_ws_roundtrip() {
     // 配置只来自环境变量；缺失或非法时给出可操作的提示，不打印任何取值。
     let env_config = TaosConfig::from_env()
@@ -205,7 +205,7 @@ async fn live_taos_native_ws_roundtrip() {
 
 /// 补测：REST 传输（taosAdapter 6041）的建连、探活与数据面往返。
 #[tokio::test]
-#[ignore = "需要真实 TDengine REST（taosAdapter 6041）与 FOUNDATIONX_TAOSX_* 环境变量"]
+#[ignore = "需要真实 TDengine REST（taosAdapter 6041）与 FOUNDATIONX_TAOSX_* 环境变量; owner: g0-trust-runner; 期限: 2026-12 复查"]
 async fn live_taos_rest_roundtrip() {
     let env_config = TaosConfig::from_env()
         .expect("必须能从 FOUNDATIONX_TAOSX_* 读取配置：请先 source taosx-rest.env");
