@@ -150,7 +150,7 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
         socket
             .send(Message::Text(query_payload.into()))
             .await
-.map_err(|error| TaosError::Unavailable(format!("ws 发送 query 失败: {error}")))?;
+            .map_err(|error| TaosError::Unavailable(format!("ws 发送 query 失败: {error}")))?;
         let query_frame = read_frame(&mut socket).await?;
         ensure_code_zero(&query_frame, "query")?;
 
@@ -341,7 +341,7 @@ mod tests {
         assert!(matches!(error, TaosError::Invalid(_)));
     }
 
-/// 状态码解析必须严格：只有「明确的整数 `code`」才被接受。
+    /// 状态码解析必须严格：只有「明确的整数 `code`」才被接受。
     #[test]
     fn status_code_parsing_is_strict() {
         assert_eq!(parse_status_code(r#"{"code":0}"#).expect("code 0"), 0);
