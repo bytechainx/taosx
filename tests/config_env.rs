@@ -359,6 +359,11 @@ fn env_variables_are_honored_and_fail_closed() {
     assert_eq!(config.timeout, Duration::from_millis(1234));
     assert_eq!(config.precision, Some(TsPrecision::Us));
     assert_eq!(config.transport, TransportMode::NativeWs);
+    // issue #16：env 里写 `as_str()` 的输出（`nativews`）也必须被接受，
+    // 与此前只认 `native` / `ws` / `native_ws` / `native-ws` 的接受集相比是放宽。
+    std::env::set_var(ENV_TRANSPORT, TransportMode::NativeWs.as_str());
+    let config = TaosConfig::from_env().expect("env 必须接受 as_str() 给出的拼写");
+    assert_eq!(config.transport, TransportMode::NativeWs);
     assert_eq!(config.max_in_flight, 8);
     assert_eq!(config.acquire_timeout, Duration::from_millis(321));
     assert_eq!(config.batch_max_rows, 77);

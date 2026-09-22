@@ -40,14 +40,17 @@ where
     }
 }
 
-/// TOML 中传输模式字段的解析器（`rest` / `native` / `ws`）。
+/// TOML 中传输模式字段的解析器
+/// （`rest` / `http` / `native` / `ws` / `nativews` / `native_ws` / `native-ws`）。
 pub(super) fn de_transport<'de, D>(deserializer: D) -> Result<TransportMode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let raw = <String as Deserialize>::deserialize(deserializer)?;
     TransportMode::parse(&raw).ok_or_else(|| {
-        serde::de::Error::custom(format!("transport 非法: {raw}（期望 rest|native|ws）"))
+        serde::de::Error::custom(format!(
+            "transport 非法: {raw}（期望 rest|http|native|ws|nativews|native_ws|native-ws）"
+        ))
     })
 }
 

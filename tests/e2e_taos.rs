@@ -57,6 +57,7 @@ use taosx::{
     ENV_PORT, ENV_PRECISION, ENV_PREFIX, ENV_TIMEOUT_MS, ENV_TLS, ENV_TLS_CA_FILE, ENV_TRANSPORT,
     ENV_USER, ENV_WRITE_MAX_ATTEMPTS, HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS,
     HARD_MAX_CLOSE_TIMEOUT, HARD_MAX_IN_FLIGHT, HARD_MAX_QUERY_ROWS, HARD_MAX_RESPONSE_BYTES,
+    HARD_MAX_TIMEOUT, HARD_MAX_WRITE_MAX_ATTEMPTS,
 };
 
 /// 公开面清单：`(条目类别, 入口 id)`，由 `cargo +nightly public-api --simplified` 派生并冻结。
@@ -299,6 +300,8 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("const", "HARD_MAX_IN_FLIGHT"),
     ("const", "HARD_MAX_QUERY_ROWS"),
     ("const", "HARD_MAX_RESPONSE_BYTES"),
+    ("const", "HARD_MAX_TIMEOUT"),
+    ("const", "HARD_MAX_WRITE_MAX_ATTEMPTS"),
     ("fn", "build_insert_sql_chunks"),
     ("fn", "build_native_ws_url"),
     ("fn", "connect_native_ws"),
@@ -513,6 +516,33 @@ fn phase_constants() {
     hit("const", "HARD_MAX_CLOSE_TIMEOUT");
     assert_eq!(HARD_MAX_CLOSE_TIMEOUT, Duration::from_secs(30));
     assert!(default.close_timeout <= HARD_MAX_CLOSE_TIMEOUT);
+    // 8 个硬上限（P2 批次补了后两个）：除「默认值在上限内」，再各走一次**真实拒绝路径**
+    // ——常量本身被断言取值，其**校验作用**也必须在公开入口（TOML）上被观测到。
+    hit("const", "HARD_MAX_TIMEOUT");
+    assert_eq!(HARD_MAX_TIMEOUT, Duration::from_secs(3_600));
+    assert!(default.timeout <= HARD_MAX_TIMEOUT);
+    assert!(default.acquire_timeout <= HARD_MAX_TIMEOUT);
+    hit("const", "HARD_MAX_WRITE_MAX_ATTEMPTS");
+    assert_eq!(HARD_MAX_WRITE_MAX_ATTEMPTS, 10);
+    assert!(default.write_max_attempts <= HARD_MAX_WRITE_MAX_ATTEMPTS);
+    let over_timeout = TaosConfig::from_toml(&format!(
+        "schema_version = 1\ntimeout_ms = {}\n",
+        HARD_MAX_TIMEOUT.as_millis() + 1
+    ))
+    .expect_err("超过 HARD_MAX_TIMEOUT 必须 fail-closed");
+    assert!(
+        over_timeout.to_string().contains("timeout"),
+        "{over_timeout}"
+    );
+    let over_attempts = TaosConfig::from_toml(&format!(
+        "schema_version = 1\nwrite_max_attempts = {}\n",
+        HARD_MAX_WRITE_MAX_ATTEMPTS + 1
+    ))
+    .expect_err("超过 HARD_MAX_WRITE_MAX_ATTEMPTS 必须 fail-closed");
+    assert!(
+        over_attempts.to_string().contains("write_max_attempts"),
+        "{over_attempts}"
+    );
 }
 
 /// 阶段 2：不依赖真实服务的值类型（错误分类、精度/传输枚举、重试策略、报告结构、DTO）。
@@ -653,12 +683,20 @@ fn phase_value_types() {
         Some(TransportMode::NativeWs)
     );
     assert_eq!(TransportMode::parse("bogus"), None);
-    // 实测非对称：`as_str()` 的 `nativews` 不在 `parse` 接受集内（`native`/`ws` 才是）。
-    // 断言它，避免把「往返」当契约；`from_env` 读的是 env 的 `native`，不受影响。
+    // `as_str()` 的输出必须能被 `parse` 接受（issue #16）：修复前 `NativeWs` 断裂
+    // （`as_str()` 给 `nativews`，接受集里只有 `native`/`ws`/`native_ws`/`native-ws`），
+    // 且 `nativews` 在 env 与 TOML **两条配置入口**上都会被 fail-closed 拒绝。
+    // 现在两个变体都要往返成立。
     hit("fn", "TransportMode::as_str");
     assert_eq!(TransportMode::Rest.as_str(), "rest");
     assert_eq!(TransportMode::NativeWs.as_str(), "nativews");
-    assert_eq!(TransportMode::parse(TransportMode::NativeWs.as_str()), None);
+    for mode in [TransportMode::Rest, TransportMode::NativeWs] {
+        assert_eq!(
+            TransportMode::parse(mode.as_str()),
+            Some(mode),
+            "{mode:?} 的 as_str 输出必须能被 parse 接受"
+        );
+    }
 
     hit("type", "TsPrecision");
     for (id, precision) in [

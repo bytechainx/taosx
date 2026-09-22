@@ -23,6 +23,21 @@
   `cargo test --workspace --all-features`，两处逐字一致；`cargo doc` 与 `cargo deny check`
   补书面暂缓声明（doc 由 `#![deny(missing_docs)]` + doctest 覆盖；deny.toml 计划 2026-12 前建立）。
 
+### 修复
+
+- **`TransportMode::as_str()` 的输出 `parse()` 不接受（issue #16）**：`as_str()` 对 `NativeWs`
+  返回 `"nativews"`，而 `parse` 的接受集只有 `native` / `ws` / `native_ws` / `native-ws`
+  ⇒ `parse(TransportMode::NativeWs.as_str())` 返回 `None`（`Rest` 与同文件的 `TsPrecision`
+  的 `ms`/`us`/`ns` 三档都对称，故属**疏漏**而非有意语义）。
+  影响**两条配置入口**：`FOUNDATIONX_TAOSX_TRANSPORT=nativews` 与 TOML `transport = "nativews"`
+  （后者经 `src/config/parse.rs` 的 `de_transport` 走同一个 `parse`）都会被 fail-closed 拒绝 ——
+  而 `nativews` 恰是本仓公开 API `as_str()` 给出的规范拼写。现把 `"nativews"` 纳入接受集，
+  两个变体的往返均成立（大小写与首尾空白不敏感）；`de_transport` 的文档注释与错误提示同步列全接受集。
+  属**实现向契约靠拢**（`docs/versioning.md` §5「实现向契约靠拢」除外条款；与同一函数据此判 PATCH 的
+  先例同型）：函数注释承诺的接受集与同类型 `as_str()` 的输出本应自洽，实现与之不符。
+  **版本不在本条切**：`[Unreleased]` 已承载 P1×5 与 P2 两批条目（自 `3305472` 起已合并、未发布），
+  单独切版会把它们一并归入同一版本号 ⇒ 留给该批次的发布方在切版时一并带走。
+
 ## [0.1.5] - 2026-09-23
 
 ### 修复
