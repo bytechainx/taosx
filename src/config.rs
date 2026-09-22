@@ -19,11 +19,17 @@ use serde::Deserialize;
 
 use crate::error::{TaosError, TaosResult};
 
+mod builder;
+mod endpoint;
+mod enums;
 mod parse;
+
+pub use builder::TaosConfigBuilder;
+pub use enums::{TransportMode, TsPrecision};
 
 use self::parse::{
     de_millis, de_optional_precision, de_transport, env_bool, env_non_empty, env_parsed,
-    env_trimmed, host_is_loopback, url_host, valid_host, valid_ident,
+    env_trimmed, host_is_loopback, valid_host, valid_ident,
 };
 
 /// 环境变量前缀。
@@ -91,95 +97,6 @@ pub const HARD_MAX_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// 库名校验与 `client` 模块的标识符校验共用同一上界，避免两处校验逻辑漂移。
 pub(crate) const MAX_IDENT_BYTES: usize = 192;
-
-/// 时间戳精度（库级；`TaosPoint::timestamp_ns` 始终为纳秒，写入前按精度换算）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TsPrecision {
-    /// 毫秒（TDengine 默认）。
-    #[default]
-    Ms,
-    /// 微秒。
-    Us,
-    /// 纳秒。
-    Ns,
-}
-
-impl TsPrecision {
-    /// 从 TDengine 返回值解析（`ms` / `us` / `ns`，大小写不敏感）。
-    #[must_use]
-    pub fn parse(text: &str) -> Option<Self> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "ms" => Some(Self::Ms),
-            "us" => Some(Self::Us),
-            "ns" => Some(Self::Ns),
-            _ => None,
-        }
-    }
-
-    /// 精度名（小写，与 TDengine `PRECISION` 取值一致）。
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ms => "ms",
-            Self::Us => "us",
-            Self::Ns => "ns",
-        }
-    }
-
-    /// 纳秒 → 库时间戳数值（**显式向 0 截断**）。
-    ///
-    /// 本方法不做精度损失检查；需要拒绝静默截断的写入路径请使用
-    /// [`crate::build_insert_sql_chunks`]，它会对未对齐的时间戳 fail-closed。
-    #[must_use]
-    pub const fn from_nanos(self, timestamp_ns: i64) -> i64 {
-        match self {
-            Self::Ns => timestamp_ns,
-            Self::Us => timestamp_ns / 1_000,
-            Self::Ms => timestamp_ns / 1_000_000,
-        }
-    }
-
-    /// 库时间戳数值 → 纳秒（饱和运算，不 panic）。
-    #[must_use]
-    pub const fn to_nanos(self, timestamp: i64) -> i64 {
-        match self {
-            Self::Ns => timestamp,
-            Self::Us => timestamp.saturating_mul(1_000),
-            Self::Ms => timestamp.saturating_mul(1_000_000),
-        }
-    }
-}
-
-/// 传输模式：REST（默认）或原生 WebSocket。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TransportMode {
-    /// HTTP REST（`/rest/sql`，端口 6041）。
-    #[default]
-    Rest,
-    /// 原生 WebSocket（`/rest/ws`）。
-    NativeWs,
-}
-
-impl TransportMode {
-    /// 从字符串解析（`rest` / `http` / `native` / `ws` / `native_ws` / `native-ws`）。
-    #[must_use]
-    pub fn parse(text: &str) -> Option<Self> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "rest" | "http" => Some(Self::Rest),
-            "native" | "ws" | "native_ws" | "native-ws" => Some(Self::NativeWs),
-            _ => None,
-        }
-    }
-
-    /// 模式名（`rest` / `nativews`）。
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Rest => "rest",
-            Self::NativeWs => "nativews",
-        }
-    }
-}
 
 /// TDengine 客户端配置。
 ///
@@ -432,63 +349,9 @@ impl TaosConfig {
     pub fn builder() -> TaosConfigBuilder {
         TaosConfigBuilder::new()
     }
+}
 
-    /// REST SQL 端点：`http(s)://host:port/rest/sql`。
-    #[must_use]
-    pub fn rest_sql_url(&self) -> String {
-        self.rest_sql_url_for(&self.host)
-    }
-
-    /// 指定主机的 REST SQL 端点。
-    #[must_use]
-    pub fn rest_sql_url_for(&self, host: &str) -> String {
-        let scheme = if self.tls { "https" } else { "http" };
-        format!("{scheme}://{}:{}/rest/sql", url_host(host), self.port)
-    }
-
-    /// 带 database 路径的 REST SQL 端点。
-    #[must_use]
-    pub fn rest_sql_db_url(&self) -> String {
-        let base = self.rest_sql_url();
-        if self.database.is_empty() {
-            base
-        } else {
-            format!("{base}/{}", self.database)
-        }
-    }
-
-    /// 原生 WebSocket SQL 端点：`ws(s)://host:port/rest/ws`。
-    #[must_use]
-    pub fn native_ws_url(&self) -> String {
-        let scheme = if self.tls { "wss" } else { "ws" };
-        format!("{scheme}://{}:{}/rest/ws", url_host(&self.host), self.port)
-    }
-
-    /// 结构化解析 REST SQL 端点（校验 scheme/host/port 合法）。
-    pub fn rest_sql_endpoint(&self) -> TaosResult<url::Url> {
-        url::Url::parse(&self.rest_sql_url())
-            .map_err(|error| TaosError::Config(format!("REST 端点非法（{error}）")))
-    }
-
-    /// 结构化解析原生 WebSocket 端点。
-    pub fn native_ws_endpoint(&self) -> TaosResult<url::Url> {
-        url::Url::parse(&self.native_ws_url())
-            .map_err(|error| TaosError::Config(format!("Native WS 端点非法（{error}）")))
-    }
-
-    /// 连接尝试主机序列：主 `host` + `hosts` 备用（去重、保序）。
-    #[must_use]
-    pub fn endpoint_hosts(&self) -> Vec<String> {
-        let mut hosts = Vec::with_capacity(1 + self.hosts.len());
-        hosts.push(self.host.clone());
-        for host in &self.hosts {
-            if !hosts.iter().any(|known| known == host) {
-                hosts.push(host.clone());
-            }
-        }
-        hosts
-    }
-
+impl TaosConfig {
     /// 从环境变量覆盖当前配置（env 值优先于结构体已有值）。
     fn apply_env_overrides(&mut self) -> TaosResult<()> {
         if let Some(value) = env_non_empty(ENV_HOST) {
@@ -558,179 +421,6 @@ impl TaosConfig {
             self.write_max_attempts = value.max(1);
         }
         Ok(())
-    }
-}
-
-/// [`TaosConfig`] 的链式构建器。
-///
-/// 密码等敏感字段只能通过构建器或环境变量注入。
-#[derive(Clone, Debug)]
-pub struct TaosConfigBuilder {
-    inner: TaosConfig,
-}
-
-impl Default for TaosConfigBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TaosConfigBuilder {
-    /// 从默认值开始。
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            inner: TaosConfig::default(),
-        }
-    }
-
-    /// 从已有配置开始（便于覆盖少量字段）。
-    #[must_use]
-    pub fn from_config(config: TaosConfig) -> Self {
-        Self { inner: config }
-    }
-
-    /// 设置主机名或 IP。
-    #[must_use]
-    pub fn host(mut self, host: impl Into<String>) -> Self {
-        self.inner.host = host.into();
-        self
-    }
-
-    /// 设置 REST / WS 端口。
-    #[must_use]
-    pub fn port(mut self, port: u16) -> Self {
-        self.inner.port = port;
-        self
-    }
-
-    /// 设置数据库名。
-    #[must_use]
-    pub fn database(mut self, database: impl Into<String>) -> Self {
-        self.inner.database = database.into();
-        self
-    }
-
-    /// 设置用户名。
-    #[must_use]
-    pub fn user(mut self, user: impl Into<String>) -> Self {
-        self.inner.user = user.into();
-        self
-    }
-
-    /// 设置密码；密码不会出现在 `Debug` 输出中。
-    #[must_use]
-    pub fn password(mut self, password: impl Into<String>) -> Self {
-        self.inner.password = password.into();
-        self
-    }
-
-    /// 设置是否启用 HTTPS / WSS。
-    #[must_use]
-    pub fn tls(mut self, enabled: bool) -> Self {
-        self.inner.tls = enabled;
-        self
-    }
-
-    /// 设置 PEM CA 文件路径。
-    #[must_use]
-    pub fn tls_ca_file(mut self, path: impl Into<PathBuf>) -> Self {
-        self.inner.tls_ca_file = Some(path.into());
-        self
-    }
-
-    /// 设置请求超时。
-    #[must_use]
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.inner.timeout = timeout;
-        self
-    }
-
-    /// 设置显式时间戳精度。
-    #[must_use]
-    pub fn precision(mut self, precision: TsPrecision) -> Self {
-        self.inner.precision = Some(precision);
-        self
-    }
-
-    /// 设置传输模式。
-    #[must_use]
-    pub fn transport(mut self, transport: TransportMode) -> Self {
-        self.inner.transport = transport;
-        self
-    }
-
-    /// 设置全局 in-flight 上限。
-    #[must_use]
-    pub fn max_in_flight(mut self, max_in_flight: usize) -> Self {
-        self.inner.max_in_flight = max_in_flight;
-        self
-    }
-
-    /// 设置获取 in-flight 许可的超时。
-    #[must_use]
-    pub fn acquire_timeout(mut self, timeout: Duration) -> Self {
-        self.inner.acquire_timeout = timeout;
-        self
-    }
-
-    /// 设置批量写入默认每批最大行数。
-    #[must_use]
-    pub fn batch_max_rows(mut self, batch_max_rows: usize) -> Self {
-        self.inner.batch_max_rows = batch_max_rows;
-        self
-    }
-
-    /// 设置单条 SQL 请求最大字节数。
-    #[must_use]
-    pub fn batch_max_bytes(mut self, batch_max_bytes: usize) -> Self {
-        self.inner.batch_max_bytes = batch_max_bytes;
-        self
-    }
-
-    /// 设置 REST 响应体最大字节数。
-    #[must_use]
-    pub fn max_response_bytes(mut self, max_response_bytes: usize) -> Self {
-        self.inner.max_response_bytes = max_response_bytes;
-        self
-    }
-
-    /// 设置单次查询最大结果行数。
-    #[must_use]
-    pub fn max_query_rows(mut self, max_query_rows: usize) -> Self {
-        self.inner.max_query_rows = max_query_rows;
-        self
-    }
-
-    /// 设置关闭排空 deadline。
-    #[must_use]
-    pub fn close_timeout(mut self, timeout: Duration) -> Self {
-        self.inner.close_timeout = timeout;
-        self
-    }
-
-    /// 设置备用主机列表。
-    #[must_use]
-    pub fn hosts<I, S>(mut self, hosts: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.inner.hosts = hosts.into_iter().map(Into::into).collect();
-        self
-    }
-
-    /// 设置幂等写默认最大重试次数。
-    #[must_use]
-    pub fn write_max_attempts(mut self, attempts: u32) -> Self {
-        self.inner.write_max_attempts = attempts.max(1);
-        self
-    }
-
-    /// 校验并产出配置。
-    pub fn build(self) -> TaosResult<TaosConfig> {
-        self.inner.validate()?;
-        Ok(self.inner)
     }
 }
 
