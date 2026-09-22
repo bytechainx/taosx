@@ -8,6 +8,24 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-22
+
+### 变更
+
+- **内部结构改写（公开 API 与可观察契约均不变）**：按 `docs/module-rules.md` §5.5 的手法，把
+  `src/config.rs` 的三块职责下沉为子模块 —— 精度与传输模式枚举 → `src/config/enums.rs`、
+  端点 URL 构造 → `src/config/endpoint.rs`、链式构建器 → `src/config/builder.rs`。
+  门面 `src/config.rs` 保留模块文档、`ENV_*` / `DEFAULT_*` / `HARD_MAX_*` 常量、
+  `TaosConfig` 定义与 `Default` / `Debug`、`from_env` / `from_toml` / `from_toml_file` /
+  `validate` / `builder`、私有的 `apply_env_overrides`，以及**原有内联测试**。
+  `TsPrecision` / `TransportMode` / `TaosConfigBuilder` 经门面 `pub use` 导出，故公开路径与
+  crate 内部路径（`crate::config::{TsPrecision, TransportMode, TaosConfigBuilder}`）均不变；
+  `src/config/parse.rs` 的 `use super::{…}` 与 `src/client/sql.rs` 的 `use crate::config::{…}`
+  **一行未改**。`src/config.rs` 生产段由 **736 → 426** 行。
+  动机：`module-rules` 是元仓库必需检查，且它审计各仓**默认分支**，故当 `config.rs` 生产段距
+  `MR-STRUCT-007` 的 800 行 ERROR 阈值只剩 64 行时，任一仓的任意改动都可能卡住元仓库的全部 PR。
+  属**纯搬移**（行多重集比对确认零代码行丢失），全部 129 项测试与 doctest 结果不变。
+
 ## [0.1.2] - 2026-09-22
 
 ### 修正

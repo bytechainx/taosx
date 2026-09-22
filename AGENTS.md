@@ -19,7 +19,18 @@ src/
 ├── lib.rs       # 入口：模块声明 + 受控 re-export
 ├── batcher.rs   # WriteBatcher 异步批量写入器
 ├── client.rs    # TaosPool 连接池 + build_insert_sql_chunks 分块 SQL 构造
-├── config.rs    # TaosConfig 配置结构体 + builder + env/toml 加载 + 校验
+├── client/      # 连接池实现子模块
+│   ├── response.rs # 响应解析
+│   ├── sql.rs      # SQL 执行与标识符校验
+│   ├── types.rs    # 内部类型
+│   └── write.rs    # 写入路径
+├── config.rs    # TaosConfig 门面：ENV_*/DEFAULT_*/HARD_MAX_* 常量、定义与 Default/Debug、
+│                # from_env/from_toml(_file)/validate/builder、apply_env_overrides、内联测试
+├── config/      # 配置子模块
+│   ├── builder.rs  # TaosConfigBuilder（链式覆盖）
+│   ├── endpoint.rs # REST / WS 端点 URL 与连接尝试主机序列
+│   ├── enums.rs    # TsPrecision / TransportMode
+│   └── parse.rs    # TOML 反序列化、env 读取、主机与标识符校验
 ├── error.rs     # TaosError / TaosResult
 ├── metrics.rs   # TaosMetricsSnapshot / ws_probe_totals 观测指标
 ├── native.rs    # 原生 WebSocket 握手、短会话 SQL 执行、TCP 探测
