@@ -534,9 +534,21 @@ write_max_attempts = 3
 
     #[test]
     fn toml_rejects_schema_and_unknown_fields() {
-        assert!(TaosConfig::from_toml("host = \"127.0.0.1\"\n").is_err());
-        assert!(TaosConfig::from_toml("schema_version = 99\n").is_err());
-        assert!(TaosConfig::from_toml("schema_version = 1\nsink_id = \"m\"\n").is_err());
+        let error = TaosConfig::from_toml("host = \"127.0.0.1\"\n")
+            .expect_err("缺少 schema_version 必须拒绝");
+        assert!(
+            matches!(error, TaosError::Config(_)) && error.to_string().contains("schema_version"),
+            "{error:?}"
+        );
+        let error =
+            TaosConfig::from_toml("schema_version = 99\n").expect_err("schema_version=99 必须拒绝");
+        assert!(
+            matches!(error, TaosError::Config(_)) && error.to_string().contains("不支持"),
+            "{error:?}"
+        );
+        let error = TaosConfig::from_toml("schema_version = 1\nsink_id = \"m\"\n")
+            .expect_err("未知字段必须拒绝");
+        assert!(matches!(error, TaosError::Config(_)), "{error:?}");
     }
 
     #[test]
@@ -549,8 +561,12 @@ write_max_attempts = 3
 
     #[test]
     fn toml_rejects_invalid_precision_and_transport() {
-        assert!(TaosConfig::from_toml("schema_version = 1\nprecision = \"bogus\"\n").is_err());
-        assert!(TaosConfig::from_toml("schema_version = 1\ntransport = \"grpc\"\n").is_err());
+        let error = TaosConfig::from_toml("schema_version = 1\nprecision = \"bogus\"\n")
+            .expect_err("非法 precision 必须拒绝");
+        assert!(matches!(error, TaosError::Config(_)), "{error:?}");
+        let error = TaosConfig::from_toml("schema_version = 1\ntransport = \"grpc\"\n")
+            .expect_err("非法 transport 必须拒绝");
+        assert!(matches!(error, TaosError::Config(_)), "{error:?}");
     }
 
     #[test]
@@ -586,7 +602,10 @@ write_max_attempts = 3
             },
         ];
         for config in cases {
-            assert!(config.validate().is_err(), "{config:?} 必须被拒绝");
+            let error = config
+                .validate()
+                .expect_err(&format!("{config:?} 必须被拒绝"));
+            assert!(matches!(error, TaosError::Config(_)), "{error:?}");
         }
     }
 
@@ -596,14 +615,22 @@ write_max_attempts = 3
             host: "td.example".into(),
             ..Default::default()
         };
-        assert!(plaintext.validate().is_err());
+        let error = plaintext.validate().expect_err("远程明文必须拒绝");
+        assert!(
+            matches!(error, TaosError::Config(_)) && error.to_string().contains("TLS"),
+            "{error:?}"
+        );
 
         let no_password = TaosConfig {
             host: "td.example".into(),
             tls: true,
             ..Default::default()
         };
-        assert!(no_password.validate().is_err());
+        let error = no_password.validate().expect_err("远程无密码必须拒绝");
+        assert!(
+            matches!(error, TaosError::Config(_)) && error.to_string().contains("认证密码"),
+            "{error:?}"
+        );
 
         let secure = TaosConfig {
             host: "td.example".into(),
@@ -626,7 +653,10 @@ write_max_attempts = 3
                 host: bad.into(),
                 ..Default::default()
             };
-            assert!(config.validate().is_err(), "坏主机 {bad} 必须被拒绝");
+            let error = config
+                .validate()
+                .expect_err(&format!("坏主机 {bad} 必须被拒绝"));
+            assert!(matches!(error, TaosError::Config(_)), "{error:?}");
         }
         let ipv6 = TaosConfig {
             host: "::1".into(),

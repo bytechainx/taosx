@@ -235,11 +235,29 @@ mod tests {
             subtable_name("ticks", "BTC/USDT").expect("a"),
             subtable_name("ticks", "BTC_USDT").expect("b")
         );
-        assert!(subtable_name("ticks", &"X".repeat(MAX_SYMBOL_BYTES + 1)).is_err());
-        assert!(validate_ident("a b").is_err());
-        assert!(validate_ident("1abc").is_err());
-        assert!(validate_ident("").is_err());
-        assert!(validate_ident("ok_name1").is_ok());
+        let error = subtable_name("ticks", &"X".repeat(MAX_SYMBOL_BYTES + 1))
+            .expect_err("超长 tag 值必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("tag 值超过"),
+            "{error:?}"
+        );
+        let error = validate_ident("a b").expect_err("含空格必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("非法字符"),
+            "{error:?}"
+        );
+        let error = validate_ident("1abc").expect_err("数字开头必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_))
+                && error.to_string().contains("字母或下划线开头"),
+            "{error:?}"
+        );
+        let error = validate_ident("").expect_err("空标识符必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("长度"),
+            "{error:?}"
+        );
+        validate_ident("ok_name1").expect("合法标识符必须通过");
     }
 
     #[test]
@@ -257,15 +275,22 @@ mod tests {
         assert!(build_insert_sql_chunks("ticks", &[], TsPrecision::Ms, 10)
             .expect("空")
             .is_empty());
-        assert!(build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 0).is_err());
-        assert!(build_insert_sql_chunks(
-            "ticks",
-            &points,
-            TsPrecision::Ms,
-            HARD_MAX_BATCH_ROWS + 1
-        )
-        .is_err());
-        assert!(build_insert_sql_chunks("bad name", &points, TsPrecision::Ms, 1).is_err());
+        let error = build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, 0)
+            .expect_err("max_rows=0 必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("max_rows"),
+            "{error:?}"
+        );
+        let error =
+            build_insert_sql_chunks("ticks", &points, TsPrecision::Ms, HARD_MAX_BATCH_ROWS + 1)
+                .expect_err("max_rows 超硬上限必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("max_rows"),
+            "{error:?}"
+        );
+        let error = build_insert_sql_chunks("bad name", &points, TsPrecision::Ms, 1)
+            .expect_err("非法超级表名必须拒绝");
+        assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
     }
 
     #[test]
@@ -282,7 +307,8 @@ mod tests {
     #[test]
     fn insert_sql_rejects_unaligned_timestamp() {
         let point = TaosPoint::new("A", 1_500, "0", "0");
-        assert!(build_insert_sql_chunks("ticks", &[point], TsPrecision::Ns, 1).is_ok());
+        build_insert_sql_chunks("ticks", &[point], TsPrecision::Ns, 1)
+            .expect("Ns 精度天然对齐必须通过");
         let point = TaosPoint::new("A", 1_500, "0", "0");
         let error =
             build_insert_sql_chunks("ticks", &[point], TsPrecision::Ms, 1).expect_err("必须拒绝");
@@ -295,9 +321,10 @@ mod tests {
             encode_timestamp(1_500_000, TsPrecision::Us).expect("对齐"),
             1500
         );
+        let error = encode_timestamp(1_500, TsPrecision::Us).expect_err("未对齐必须拒绝");
         assert!(
-            encode_timestamp(1_500, TsPrecision::Us).is_err(),
-            "未对齐必须拒绝"
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("无法无损表示"),
+            "{error:?}"
         );
     }
 
@@ -336,7 +363,11 @@ mod tests {
             columns: Vec::new(),
             affected_rows: None,
         };
-        assert!(validate_decimal_schema(&double).is_err());
+        let error = validate_decimal_schema(&double).expect_err("DOUBLE 必须拒绝");
+        assert!(
+            matches!(error, TaosError::Backend { .. }) && error.to_string().contains("NCHAR(64+)"),
+            "{error:?}"
+        );
 
         let text = TaosExecResult {
             code: 0,
@@ -365,7 +396,11 @@ mod tests {
             parse_ts_cell("1000", TsPrecision::Ms).expect("数值"),
             1_000_000_000
         );
-        assert!(parse_ts_cell("not-a-time", TsPrecision::Ms).is_err());
+        let error = parse_ts_cell("not-a-time", TsPrecision::Ms).expect_err("非法时间戳必须拒绝");
+        assert!(
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("无法解析时间戳"),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -378,11 +413,12 @@ mod tests {
         assert!(!stats.closed);
         assert!(pool.liveness());
         assert!(!pool.is_closed());
-        assert!(TaosPool::new(TaosConfig {
+        let error = TaosPool::new(TaosConfig {
             max_in_flight: 0,
             ..TaosConfig::default()
         })
-        .is_err());
+        .expect_err("max_in_flight=0 必须拒绝");
+        assert!(matches!(error, TaosError::Config(_)), "{error:?}");
     }
 
     #[tokio::test]
@@ -428,7 +464,15 @@ mod tests {
             ..TaosConfig::default()
         };
         let pool = TaosPool::new(config).expect("pool");
-        assert!(pool.exec("SELECT value").await.is_err());
+        let error = pool
+            .exec("SELECT value")
+            .await
+            .expect_err("行数超出 max_query_rows 必须拒绝");
+        assert!(
+            matches!(error, TaosError::Unavailable(_))
+                && error.to_string().contains("max_query_rows"),
+            "{error:?}"
+        );
 
         let port = serve_response("200 OK", "中文响应体超过上限", false).await;
         let config = TaosConfig {
@@ -637,9 +681,13 @@ mod tests {
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].tag_value, "BTC");
         assert_eq!(points[0].timestamp_ns, 1_000_000_000);
+        let error = pool
+            .query_series("ticks", 2, 1)
+            .await
+            .expect_err("start > end 必须拒绝");
         assert!(
-            pool.query_series("ticks", 2, 1).await.is_err(),
-            "start > end 必须拒绝"
+            matches!(error, TaosError::Invalid(_)) && error.to_string().contains("start > end"),
+            "{error:?}"
         );
     }
 

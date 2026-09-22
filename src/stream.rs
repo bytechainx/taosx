@@ -104,6 +104,7 @@ impl TaosPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::TaosError;
     use futures_util::StreamExt;
 
     #[tokio::test]
@@ -126,7 +127,11 @@ mod tests {
     fn chunk_hint_is_validated_and_exposed() {
         let stream = TaosQueryStream::from_rows_chunked(Vec::new(), 32).expect("合法提示");
         assert_eq!(stream.chunk_hint(), 32);
-        assert!(TaosQueryStream::from_rows_chunked(Vec::new(), 0).is_err());
-        assert!(validate_chunk_hint(0).is_err());
+        let error = TaosQueryStream::from_rows_chunked(Vec::new(), 0)
+            .err()
+            .expect("chunk_hint=0 必须拒绝");
+        assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+        let error = validate_chunk_hint(0).expect_err("chunk_hint=0 必须拒绝");
+        assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
     }
 }
