@@ -594,6 +594,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_flush_on_time_window() {
+        // 时间窗分支：行数未达 max_rows，但距上次刷写超过 flush_interval 后，
+        // 下一次 push 必须触发刷写（单次 flush = CREATE + DESCRIBE + INSERT 三条响应）。
+        let port = serve_sequence(vec![CREATE_OK, DESCRIBE_OK, INSERT_OK]).await;
+        let pool = pool_with(port, 10);
+        let batcher = WriteBatcher::new(
+            pool,
+            "ticks",
+            WriteBatcherConfig {
+                max_rows: 100,
+                flush_interval: Duration::from_millis(10),
+                ..Default::default()
+            },
+        );
+        batcher
+            .push(point("A", 1_000_000))
+            .await
+            .expect("首次 push 不触发刷写");
+        assert_eq!(
+            batcher.totals().await,
+            (0, 0),
+            "行数与时间窗均未达，不应刷写"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        batcher
+            .push(point("B", 2_000_000))
+            .await
+            .expect("时间窗触发刷写");
+        assert_eq!(
+            batcher.totals().await,
+            (2, 0),
+            "时间窗到期后 push 必须刷写全部缓冲行"
+        );
+    }
+
+    #[tokio::test]
     async fn auto_flush_on_row_threshold() {
         // 每次 flush 都会先 ensure_stable（CREATE + DESCRIBE）再 INSERT，故需 6 条响应。
         let port = serve_sequence(vec![
