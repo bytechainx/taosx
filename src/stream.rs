@@ -14,6 +14,7 @@ use crate::error::TaosResult;
 use crate::point::TaosPoint;
 
 /// Driver 技术行流式查询包装（内部仍受 `max_query_rows` 限制）。
+#[derive(Debug)]
 pub struct TaosQueryStream {
     rows: std::vec::IntoIter<TaosPoint>,
     chunk_hint: usize,
@@ -127,11 +128,27 @@ mod tests {
     fn chunk_hint_is_validated_and_exposed() {
         let stream = TaosQueryStream::from_rows_chunked(Vec::new(), 32).expect("合法提示");
         assert_eq!(stream.chunk_hint(), 32);
-        let error = TaosQueryStream::from_rows_chunked(Vec::new(), 0)
-            .err()
-            .expect("chunk_hint=0 必须拒绝");
+        // `TaosQueryStream` 已实现 `Debug`（本项新增），此处可直接用 `expect_err`。
+        let error =
+            TaosQueryStream::from_rows_chunked(Vec::new(), 0).expect_err("chunk_hint=0 必须拒绝");
         assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
         let error = validate_chunk_hint(0).expect_err("chunk_hint=0 必须拒绝");
         assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
+    }
+
+    /// `TaosQueryStream` 必须可 `Debug`，且输出含关键字段（剩余行数、块提示、结束标志）。
+    ///
+    /// 三个字段的底层类型均实现 `Debug`（`IntoIter<TaosPoint>` / `usize` / `bool`），
+    /// 故直接 derive；行内容均为市场数据，不含任何凭据。
+    #[test]
+    fn debug_output_is_available_and_non_empty() {
+        let stream =
+            TaosQueryStream::from_rows_chunked(vec![TaosPoint::new("A", 1, "0.01", "0.02")], 16)
+                .expect("合法提示");
+        let rendered = format!("{stream:?}");
+        assert!(!rendered.is_empty(), "Debug 输出不得为空");
+        assert!(rendered.contains("TaosQueryStream"), "{rendered}");
+        assert!(rendered.contains("chunk_hint: 16"), "{rendered}");
+        assert!(rendered.contains("done: false"), "{rendered}");
     }
 }
