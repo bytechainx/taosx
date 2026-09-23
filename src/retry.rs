@@ -54,7 +54,17 @@ impl RetryPolicy {
         }
     }
 
-    /// 幂等写路径：最多 3 次，deadline 30 秒。
+    /// 幂等写路径默认策略：最多 3 次，deadline 30 秒。
+    ///
+    /// 与实现的对应关系：`deadline` 确为 `Duration::from_secs(30)`，退避为
+    /// `initial_backoff = 100ms` 起、`max_backoff = 2s` 封顶。因该退避在
+    /// `max_attempts` 取硬上限 10 时累计仍不足 30 秒，`deadline` 只作安全上界、
+    /// 通常不触发，实际约束来自 `max_attempts`。
+    ///
+    /// 注意 `max_attempts`：默认值 3 仅在直接使用本策略时生效；真实写路径
+    /// `TaosPool::write_batch_idempotent` 会用配置项 `write_max_attempts`
+    /// （默认 1、硬上限 10）整体覆盖它——该路径实际取自本构造函数的是
+    /// `deadline` 与退避参数。
     #[must_use]
     pub fn for_idempotent_write() -> Self {
         Self {

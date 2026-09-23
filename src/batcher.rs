@@ -474,7 +474,8 @@ mod tests {
         assert!(batcher.has_pending().await, "部分成功后必须进入 pending");
         batcher.ack_pending().await.expect("确认 pending");
         assert!(!batcher.has_pending().await);
-        assert!(batcher.ack_pending().await.is_err(), "重复确认必须拒绝");
+        let error = batcher.ack_pending().await.expect_err("重复确认必须拒绝");
+        assert!(matches!(error, TaosError::Invalid(_)), "{error:?}");
     }
 
     #[tokio::test]

@@ -73,6 +73,8 @@ pub async fn connect_native_ws(config: &TaosConfig) -> TaosResult<()> {
         Ok(result) => result,
         Err(_) => Err(TaosError::Timeout(format!("native ws 连接超时: {url}"))),
     };
+    // `is_ok()` 在此是「统计成功个数」（喂给 ws_probe 指标），不是断言判定，
+    // 故保留布尔取值、不改为类型匹配。
     crate::metrics::record_ws_probe(result.is_ok());
     result
 }
@@ -161,6 +163,7 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
     };
     match tokio::time::timeout(config.timeout, attempt).await {
         Ok(result) => {
+            // 同 `connect_native_ws`：`is_ok()` 用于「统计成功个数」的指标累加。
             crate::metrics::record_ws_probe(result.is_ok());
             result
         }
@@ -304,7 +307,8 @@ mod tests {
             max_in_flight: 0,
             ..config
         };
-        assert!(validate_mode(&bad).is_err());
+        let error = validate_mode(&bad).expect_err("max_in_flight=0 必须拒绝");
+        assert!(matches!(error, TaosError::Config(_)), "{error:?}");
     }
 
     #[tokio::test]
@@ -350,24 +354,30 @@ mod tests {
                 .expect("code 65535"),
             65535
         );
-        // 非 JSON
-        assert!(parse_status_code("not json").is_err());
-        // 顶层非对象 / 缺 code
-        assert!(parse_status_code(r#"[1,2]"#).is_err());
-        assert!(parse_status_code(r#"{"action":"conn","req_id":0}"#).is_err());
-        // code 非整数
-        assert!(parse_status_code(r#"{"code":"0"}"#).is_err());
-        assert!(parse_status_code(r#"{"code":0.5}"#).is_err());
-        assert!(parse_status_code(r#"{"code":true}"#).is_err());
-        assert!(parse_status_code(r#"{"code":null}"#).is_err());
-        // 超出 i32（不得截断或回绕）
-        assert!(parse_status_code(r#"{"code":4294967296}"#).is_err());
+        // 以下每类畸形状态都必须 fail-closed 为 `Unavailable`（而非误判成功）。
+        for (payload, why) in [
+            ("not json", "非 JSON"),
+            (r#"[1,2]"#, "顶层非对象"),
+            (r#"{"action":"conn","req_id":0}"#, "缺 code 字段"),
+            (r#"{"code":"0"}"#, "code 为字符串"),
+            (r#"{"code":0.5}"#, "code 为浮点"),
+            (r#"{"code":true}"#, "code 为布尔"),
+            (r#"{"code":null}"#, "code 为 null"),
+            // 超出 i32（不得截断或回绕）
+            (r#"{"code":4294967296}"#, "code 超出 i32 取值域"),
+        ] {
+            let error = parse_status_code(payload).expect_err(why);
+            assert!(
+                matches!(error, TaosError::Unavailable(_)),
+                "{why}: 必须 fail-closed 为 Unavailable，实际 {error:?}"
+            );
+        }
     }
 
     /// 非 0 状态码必须映射为 [`TaosError::Unavailable`]，且服务端 `message` 不入消息。
     #[test]
     fn ensure_code_zero_rejects_nonzero_code() {
-        assert!(ensure_code_zero(r#"{"code":0}"#, "conn").is_ok());
+        ensure_code_zero(r#"{"code":0}"#, "conn").expect("code=0 必须通过");
 
         let error = ensure_code_zero(r#"{"code":65535,"message":"server not connected"}"#, "conn")
             .expect_err("非 0 code 必须失败");
@@ -442,10 +452,8 @@ mod tests {
     #[test]
     fn binary_frame_with_invalid_utf8_fails_closed() {
         let payload = frame_payload(Message::Binary(vec![0xff, 0xfe].into())).expect("载荷");
-        assert!(
-            parse_status_code(&payload).is_err(),
-            "非法 UTF-8 不得被当作成功"
-        );
+        let error = parse_status_code(&payload).expect_err("非法 UTF-8 不得被当作成功");
+        assert!(matches!(error, TaosError::Unavailable(_)), "{error:?}");
     }
 
     #[test]
