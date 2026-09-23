@@ -59,3 +59,9 @@ panic = "deny"
 unreachable = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+[package.metadata.bytechainx]
+module_id = "taosx"
+owner = "bytechainx"
+role = "adapter"
+semantic_contract = "docs/标准.md"
