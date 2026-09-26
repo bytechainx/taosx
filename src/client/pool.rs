@@ -51,11 +51,12 @@ impl TaosPool {
         }
     }
 
-    /// 连接：构建 HTTP 客户端、可选建库、探测精度、`ping`。
+    /// 连接：构建 HTTP 客户端、可选建库、探测精度、`ping`（会发网，不是惰性构造）。
     ///
     /// - `TransportMode::NativeWs` 时先做一次原生 WS 握手探测（失败即返回）。
-    /// - 主 `host` 不可用时按 `config.hosts` 顺序故障转移。
+    /// - `database` 非空时经 REST 执行 `CREATE DATABASE IF NOT EXISTS` 并探测精度。
     /// - 配置精度与数据库实际精度不一致时 fail-closed。
+    /// - 两种传输最后都 `ping`。主 `host` 不可用时按 `config.hosts` 顺序故障转移。
     pub async fn connect(config: TaosConfig) -> TaosResult<Self> {
         config.validate()?;
         let mut last_error = TaosError::Unavailable("无可用 TDengine endpoint".to_owned());
@@ -84,8 +85,8 @@ impl TaosPool {
         }
         let pool = Self::new_async(config).await?;
 
-        // REST 路径：确保 database 存在 + 精度探测 + ping。
-        // NativeWs 仅完成握手探测；SQL 默认仍走 REST（`exec_sql_ws` 提供 WS 会话）。
+        // 两种传输都走 REST 建库 / 精度探测 / ping（NativeWs 只是在这之前多一次握手）。
+        // SQL 数据面默认仍走 REST；WS 短会话用 `exec_sql_ws`。
         if !pool.inner.config.database.is_empty() {
             let database = pool.inner.config.database.clone();
             validate_ident(&database)?;

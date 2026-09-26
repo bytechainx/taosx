@@ -32,7 +32,7 @@
 //! 不触碰库内任何既有表。
 //!
 //! ```text
-//! set -a; . /home/zone/workspace/sre/secrets/env/taosx.env; set +a
+//! set -a; . /home/workspace/bytechainx/.config/taosx.env; set +a
 //! cd /home/workspace/bytechainx/taosx
 //! CARGO_TARGET_DIR=/home/workspace/bytechainx/.cargo/target \
 //!   cargo test --test e2e_taos -- --ignored --test-threads=1

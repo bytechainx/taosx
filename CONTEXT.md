@@ -59,7 +59,7 @@ _Avoid_: 时间单位（精度是库的属性，不是本地格式化偏好）
 _Avoid_: 截断（本仓库拒绝截断，不提供「按需降精度」的开关）
 
 **硬上限**（`HARD_MAX_*`）：并发、批量行数 / 字节、响应体、查询行数与关闭 deadline 的构建期
-上界，超出的配置值被 clamp 或拒绝。
+上界，超出的配置值被 `validate` 拒绝（fail-fast），不静默 clamp。
 _Avoid_: 默认值（硬上限是拒绝线，不是可调默认）
 
 **有界查询流**（`TaosQueryStream`）：先按 `max_query_rows` 有界物化、再逐行 yield 的结果流；

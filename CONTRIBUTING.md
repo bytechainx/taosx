@@ -66,8 +66,8 @@ cargo bench --bench hot_path -- --quick
 - **SQL 注入防护**：所有进入 SQL 文本的调用方输入必须经过白名单标识符校验或转义；
   `build_insert_sql_chunks` 是构造 INSERT 的唯一入口，新增写入路径必须复用它，
   禁止手工拼接 SQL。
-- **资源上界**：批量行数 / 字节、in-flight 并发、查询行数、响应字节、关闭超时在构建期校验并
-  clamp 到 `HARD_MAX_*`，不得引入运行期无界增长。
+- **资源上界**：批量行数 / 字节、in-flight 并发、查询行数、响应字节、关闭超时在构建期
+  `validate` fail-fast，不得静默 clamp，不得引入运行期无界增长。
 - 凭据（user / password）只能从环境变量或构建器注入，`Debug` 输出脱敏，禁止写入 TOML 明文。
 - 远程端点强制 HTTPS / WSS；明文 HTTP / WS 仅允许 loopback 开发端点。
 - async 代码使用 tokio，禁止阻塞 I/O。

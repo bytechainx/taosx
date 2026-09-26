@@ -48,7 +48,7 @@ src/
 - 禁止裸 `unwrap()`（库代码，crate 已 `#![deny(clippy::unwrap_used)]`）
 - async tokio，禁止阻塞 I/O；`#![forbid(unsafe_code)]`
 - 所有进入 SQL 文本的调用方输入必须经过白名单标识符校验或转义（见 `build_insert_sql_chunks` 文档）
-- 资源上界（批量行数/字节、in-flight、查询行数、响应字节）在构建期校验并 clamp 到 `HARD_MAX_*`
+- 资源上界（批量行数/字节、in-flight、查询行数、响应字节）在构建期 `validate` fail-fast，禁止静默 clamp 到 `HARD_MAX_*`
 
 ## 门禁（P0）
 

@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 文档
+
+- **`connect` 与版本自称对齐实现**：`docs/API.md` / `docs/标准.md` 改为 Cargo `0.1.5`；删除「REST `connect` 不发网」过期句。现行行为：`NativeWs` 先握手；`database` 非空则 REST `CREATE DATABASE IF NOT EXISTS` + 精度探测；两种模式均 `ping`。
+
 ### 变更
 
 - **非成功 HTTP 响应的诊断输出改经 debug 日志**（P2-9）：错误消息维持「响应正文已省略」
