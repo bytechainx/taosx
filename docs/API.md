@@ -1,18 +1,18 @@
 # taosx 公开 API
 
-**版本 / 角色**：`taosx 0.1.0` · TDengine 异步客户端（REST + 原生 WebSocket 双传输）
+**版本 / 角色**：`taosx 0.1.5` · TDengine 异步客户端（REST + 原生 WebSocket 双传输）
 
 ## 公开消费面
 
 | 主题 | 类型 / 函数 | 说明 |
 | --- | --- | --- |
-| 客户端 | `TaosPool`（别名 `TaosClient`） | `connect` / `exec` / `query` / `write_batch` / `ping` / `close`；连接池 + 背压 |
+| 客户端 | `TaosPool`（别名 `TaosClient`） | `new`（不发网）/ `connect` / `connect_from_env` / `exec` / `query` / `query_series` / `write_batch*` / `write_series` / `ensure_stable` / `exec_sql_ws` / `ping` / `health_check` / `close` |
 | 客户端状态 | `TaosPoolStats`、`TaosHealth`、`TaosExecResult` | 池统计、健康检查、执行结果 |
 | 批量写入 | `BatchWriteReport`、`BatchWritePartialError` | 写入报告与部分失败诊断 |
 | 配置 | `TaosConfig`、`TaosConfigBuilder` | `builder()` / `from_env()`（前缀 `FOUNDATIONX_TAOSX_`）/ `from_toml()` / `validate()` |
 | 传输 | `TransportMode` | `Rest`（默认，端口 6041）/ `NativeWs`（`ws(s)://host:port/rest/ws`） |
 | 精度 | `TsPrecision` | `Ms`（默认）/ `Us` / `Ns` |
-| 硬上限 | `HARD_MAX_IN_FLIGHT`、`HARD_MAX_BATCH_ROWS`、`HARD_MAX_BATCH_BYTES`、`HARD_MAX_QUERY_ROWS`、`HARD_MAX_RESPONSE_BYTES`、`HARD_MAX_CLOSE_TIMEOUT` | 构建期 clamp 的资源上界常量 |
+| 硬上限 | `HARD_MAX_IN_FLIGHT`、`HARD_MAX_BATCH_ROWS`、`HARD_MAX_BATCH_BYTES`、`HARD_MAX_QUERY_ROWS`、`HARD_MAX_RESPONSE_BYTES`、`HARD_MAX_CLOSE_TIMEOUT`、`HARD_MAX_TIMEOUT`、`HARD_MAX_WRITE_MAX_ATTEMPTS` | `validate` 越界 fail-fast。env/builder 会把 `write_max_attempts=0` 抬到 `1` 再校验 |
 | 错误 | `TaosError`、`TaosResult` | thiserror 枚举 + `#[non_exhaustive]` |
 | 数据点 | `TaosPoint` | `new(tag_value, timestamp_ns, first_value, second_value)` |
 | SQL 构造 | `build_insert_sql_chunks` | 纯函数：分块 INSERT SQL 构造，含注入防护 |
@@ -53,6 +53,6 @@ client.close().await?;
 ## 能力边界
 
 - 只做 TDengine 访问原语：连接、SQL 执行、批量写入、有界查询流；不含领域模型或业务编排。
-- `connect` 在 `NativeWs` 模式下先做一次 WS 握手探测；REST 模式构造不发起网络请求，连通性用 `ping` 显式验证。
+- `new` **不发网**（只 `validate` + 装配客户端）。`connect` **会发网**：`NativeWs` 先做 WS 握手；`database` 非空时经 REST 执行 `CREATE DATABASE IF NOT EXISTS` 并探测精度（与配置不一致则 fail-closed）；两种模式最后都 `ping`。主 `host` 失败则按 `hosts` 故障转移。默认库名 `infra_draft`、默认端口 `6041`。`NativeWs` 下 DDL/`exec`/`query` 仍走 REST。`exec_sql_ws` 仍只到 `query` 元数据帧，不含结果行。`query_series` 只收表名 + 纳秒闭区间，缺表返回空集。
 - 查询结果受 `HARD_MAX_QUERY_ROWS` / `HARD_MAX_RESPONSE_BYTES` 上界约束，超限报错而非静默截断。
 - 凭据（user/password）只从 env 或 builder 注入，`Debug` 输出脱敏。

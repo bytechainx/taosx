@@ -89,7 +89,8 @@ Basic 认证；请求/响应体大小都受 `batch_max_bytes` / `max_response_by
 | `exec_sql_ws(&config, sql)` | 短会话两步协议：`conn` 建会话 → `query` → 读元数据帧 → 关闭 |
 | `probe_native_tcp(&config, port)` | 原生 SQL 端口（默认 6030）可达性探测，不发协议帧 |
 
-`TaosPool::connect` 在 `TransportMode::NativeWs` 下会先做一次 WS 握手探测；SQL 数据面
+`TaosPool::new` **不发网**（`validate` + 装配 HTTP 客户端；若配置了 `tls_ca_file` 会同步读 PEM）。`TaosPool::connect` **会发网**：`NativeWs` 先做
+WS 握手探测；`database` 非空时经 REST 建库并探测精度；两种模式最后都 `ping`。SQL 数据面
 仍默认走 REST（可用 `TaosPool::exec_sql_ws` 显式走 WS）。`/rest/ws` 是**两步协议**：
 `exec_sql_ws` 先发 `{"action":"conn","args":{"user":…,"password":…}}` 建会话，读到
 `code == 0` 后再发 `{"action":"query","args":{"sql":…}}`，返回 `query` 的**元数据响应帧**。

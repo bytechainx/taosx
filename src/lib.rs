@@ -10,7 +10,8 @@
 //! - **Native WebSocket**：`tokio-tungstenite` → `ws(s)://host:port/rest/ws`，
 //!   由 [`connect_native_ws`] 做握手探测、[`exec_sql_ws`] 执行短会话 SQL、
 //!   [`probe_native_tcp`] 探测原生端口。`TransportMode::NativeWs` 时
-//!   [`TaosPool::connect`] 会先完成一次 WS 握手探测。
+//!   [`TaosPool::connect`] 会先完成一次 WS 握手探测；之后建库 / `exec` / `query`
+//!   仍走 REST。[`TaosPool::new`] 只校验配置，不发网。
 //!
 //! # SQL 注入防护
 //!
