@@ -5,15 +5,15 @@ name: CI
 #   cargo clippy --workspace --all-targets --all-features -- -D warnings
 #   cargo test --workspace --all-features
 #
-# doc / deny 书面暂缓声明（组织 ci.md §1 允许项目宪章声明暂缓，fmt+clippy+test 不可豁免）：
-# - `cargo doc`：暂缓。单 crate 库，文档质量由 `#![deny(missing_docs)]` 与 doctest 覆盖，
-#   独立 doc 构建 job 待引入 `cargo deny` 时一并评估。
-# - `cargo deny check`：暂缓。仓库尚无 deny.toml，供应链审计计划 2026-12 前建立
-#   （跟踪于 P2 批次收口报告 follow-up）。
+# doc / deny 状态（组织 ci.md §1：暂缓须项目声明，fmt+clippy+test 不可豁免）：
+# - `cargo deny check`：**已落实**（原暂缓，计划 2026-12 前建立；本批提前建立）。
+#   仓库已入库 `deny.toml`（licenses 白名单 + bans + sources），CI 作业名 `cargo deny`。
+# - `cargo doc`：仍暂缓。单 crate 库，文档质量由 `#![deny(missing_docs)]` 与 doctest 覆盖；
+#   实测 `cargo doc --no-deps --all-features` 15 仓全过，故可低成本启用，待本批后评估。
 #
 # 说明：
-# - 不使用 `--locked`：本仓库是库，`Cargo.lock` 不入库（由下游决定版本），
-#   CI 每次按 Cargo.toml 解析依赖，这与发布时的行为一致。
+# - 已入库 `Cargo.lock`（组织基线 R-SEC-009 / R-DEP-005：供应链可重现），
+#   CI 按锁文件解析依赖。
 # - `cargo test --workspace --all-features` 同时运行单元测试、集成测试与文档测试（doctest）。
 # - 本仓库为单 crate workspace，`--workspace` 等价全量；`--all-features` 已在本地
 #   门禁验证全绿，与 AGENTS.md 命令保持一致。
@@ -51,3 +51,30 @@ jobs:
 
       - name: cargo test --workspace --all-features
         run: cargo test --workspace --all-features
+
+  supply-chain:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  msrv:
+    name: msrv 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 MSRV 工具链
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check（按声明的 rust-version）
+        working-directory: .
+        run: cargo check --all-features
