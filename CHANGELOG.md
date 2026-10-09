@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+### 破坏性变更
+
+- MSRV 由 `1.85` 上调至 `1.88`：依赖链中的 `icu_* 2.3.0`（经 `idna_adapter`）要求
+  rustc 1.88，原声明值不可满足。同时入库 `Cargo.lock` 并新增 `deny.toml`
+  （供应链可重现，见组织基线 `R-SEC-009` / `R-DEP-005`）。
+
 ### 文档
 
 - **`connect` 与版本自称对齐实现**：`docs/API.md` / `docs/标准.md` 改为 Cargo `0.1.5`；删除「REST `connect` 不发网」过期句。现行行为：`NativeWs` 先握手；`database` 非空则 REST `CREATE DATABASE IF NOT EXISTS` + 精度探测；两种模式均 `ping`。

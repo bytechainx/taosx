@@ -1,7 +1,7 @@
 # 构建产物
 /target
-# 库 crate 不锁定依赖版本（由下游决定）
-Cargo.lock
+# 锁定依赖版本：与 deny.toml 一并保障供应链可重现（组织基线 R-SEC-009 / R-DEP-005）
+!Cargo.lock
 # graft 代码图谱缓存（可再生）
 /graft/
 # 隔离工作树

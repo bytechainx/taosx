@@ -1,0 +1,38 @@
+# cargo-deny 配置（bytechainx 15 仓统一模板）
+#
+# 依据：
+# - 组织基线 `security.md` §7 R-SEC-007（P0）：CI 运行 `cargo deny check`
+# - 组织基线 `ci.md` §6：许可证白名单项目自定
+# - 组织基线 `ci.md` §1：供应链 `cargo deny check` → 阻断
+#
+# 许可证白名单只收宽松许可（permissive）。copyleft（LGPL/AGPL/GPL）未列入：
+# 15 仓的 `LGPL-2.1-or-later` / `BSL-1.0` 仅出现在 `OR` 表达式（同时提供 MIT/Apache-2.0），
+# 故无需放行。
+
+[advisories]
+# 未维护依赖（unmaintained）：保持默认告警；本工作区的例外见各仓 `ignore`
+# 具体项见下方按仓追加的 ignore 段
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
