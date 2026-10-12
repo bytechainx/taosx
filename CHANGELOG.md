@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+### 修复
+
+- `exec_sql_ws` 的 conn / query 响应若为非法 UTF-8 的 Binary 帧，原先经有损解码后可能被当作成功；现一律返回
+  `TaosError::Unavailable`。读取层保留数据帧的 Text / Binary 类型与原始字节，为后续
+  `fetch_block` 二进制通道铺路（特性 009 T5 前置，未实现 fetch / fetch_block / 解码）。
+
 ### 破坏性变更
 
 - MSRV 由 `1.85` 上调至 `1.88`：依赖链中的 `icu_* 2.3.0`（经 `idna_adapter`）要求
