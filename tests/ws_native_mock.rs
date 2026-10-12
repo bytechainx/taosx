@@ -114,6 +114,61 @@ async fn ws_binary_frame_returns_decoded_body() {
     );
 }
 
+#[tokio::test]
+async fn ws_conn_binary_invalid_utf8_fails_closed() {
+    let mut conn_bytes =
+        br#"{"code":0,"action":"conn","message":"synthetic-conn-payload-"#.to_vec();
+    conn_bytes.push(0xff);
+    conn_bytes.extend_from_slice(br#""}"#);
+    let query_text = r#"{"code":0,"action":"query","id":1,"rows":1}"#;
+    let port = start_ws_mock(vec![
+        vec![Message::Binary(conn_bytes.into())],
+        vec![Message::Text(query_text.into())],
+    ])
+    .await;
+    let config = ws_config(port);
+
+    let error = exec_sql_ws(&config, "SELECT 1")
+        .await
+        .expect_err("conn 的 Binary JSON 字符串含非法 UTF-8 时必须拒绝");
+
+    assert!(matches!(error, TaosError::Unavailable(_)));
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("UTF-8"),
+        "必须明确拒绝非法编码：{rendered}"
+    );
+    assert!(!rendered.contains("synthetic-conn-payload"));
+    assert!(!rendered.contains('\u{fffd}'));
+}
+
+#[tokio::test]
+async fn ws_query_binary_invalid_utf8_fails_closed() {
+    let mut query_bytes =
+        br#"{"code":0,"action":"query","message":"synthetic-query-payload-"#.to_vec();
+    query_bytes.push(0xff);
+    query_bytes.extend_from_slice(br#""}"#);
+    let port = start_ws_mock(vec![
+        vec![conn_ok_frame()],
+        vec![Message::Binary(query_bytes.into())],
+    ])
+    .await;
+    let config = ws_config(port);
+
+    let error = exec_sql_ws(&config, "SELECT 1")
+        .await
+        .expect_err("query 的 Binary JSON 字符串含非法 UTF-8 时必须拒绝");
+
+    assert!(matches!(error, TaosError::Unavailable(_)));
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("UTF-8"),
+        "必须明确拒绝非法编码：{rendered}"
+    );
+    assert!(!rendered.contains("synthetic-query-payload"));
+    assert!(!rendered.contains('\u{fffd}'));
+}
+
 /// 非数据帧 fail-closed（握手阶段）：`conn` 响应不是 Text/Binary，必须返回 Err。
 #[tokio::test]
 async fn ws_non_data_frame_fails_closed() {

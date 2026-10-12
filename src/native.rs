@@ -139,7 +139,7 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
             .send(Message::Text(conn_payload.into()))
             .await
             .map_err(|error| TaosError::Unavailable(format!("ws 发送 conn 失败: {error}")))?;
-        let conn_frame = read_frame(&mut socket).await?;
+        let conn_frame = frame_payload(read_frame(&mut socket).await?)?;
         ensure_code_zero(&conn_frame, "conn")?;
 
         // 第 2 步：`query`。响应帧含字段元数据（`fields_names` / `fields_types` / …），
@@ -153,7 +153,7 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
             .send(Message::Text(query_payload.into()))
             .await
             .map_err(|error| TaosError::Unavailable(format!("ws 发送 query 失败: {error}")))?;
-        let query_frame = read_frame(&mut socket).await?;
+        let query_frame = frame_payload(read_frame(&mut socket).await?)?;
         ensure_code_zero(&query_frame, "query")?;
 
         if let Err(error) = socket.close(None).await {
@@ -174,15 +174,19 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
     }
 }
 
-/// 读取下一帧并取出 UTF-8 载荷。
+/// 读取下一数据帧，保留 Text / Binary 类型与原始载荷。
 ///
 /// 流结束（服务端未返回帧）或读失败一律返回 [`TaosError::Unavailable`]，不伪造成功。
-async fn read_frame<S>(socket: &mut S) -> TaosResult<String>
+async fn read_frame<S>(socket: &mut S) -> TaosResult<Message>
 where
     S: Stream<Item = Result<Message, WsError>> + Unpin,
 {
     match socket.next().await {
-        Some(Ok(message)) => frame_payload(message),
+        Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => Ok(message),
+        Some(Ok(other)) => Err(TaosError::Unavailable(format!(
+            "ws 响应帧类型非法（期望 Text/Binary），实际为 {}",
+            frame_kind(&other)
+        ))),
         Some(Err(error)) => Err(TaosError::Unavailable(format!("ws 读失败: {error}"))),
         None => Err(TaosError::Unavailable(
             "ws 响应流已结束：服务端未返回帧".to_owned(),
@@ -190,14 +194,16 @@ where
     }
 }
 
-/// 从响应帧中取出 UTF-8 载荷。
+/// 为 conn / query 的 JSON 消费严格读取 UTF-8 载荷。
 ///
 /// 只有 `Text` / `Binary` 两种数据帧参与协议解析；其余帧（`Ping` / `Pong` / `Close`）
 /// 视为协议异常返回 [`TaosError::Unavailable`]，保持 fail-closed。
 fn frame_payload(message: Message) -> TaosResult<String> {
     match message {
         Message::Text(text) => Ok(text.to_string()),
-        Message::Binary(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Message::Binary(bytes) => std::str::from_utf8(&bytes)
+            .map(str::to_owned)
+            .map_err(|_| TaosError::Unavailable("ws JSON 响应不是合法 UTF-8".to_owned())),
         other => Err(TaosError::Unavailable(format!(
             "ws 响应帧类型非法（期望 Text/Binary），实际为 {}",
             frame_kind(&other)
@@ -448,12 +454,91 @@ mod tests {
         }
     }
 
-    /// Binary 帧若非法 UTF-8，lossy 解码后不是合法 JSON ⇒ 仍 fail-closed。
     #[test]
     fn binary_frame_with_invalid_utf8_fails_closed() {
-        let payload = frame_payload(Message::Binary(vec![0xff, 0xfe].into())).expect("载荷");
-        let error = parse_status_code(&payload).expect_err("非法 UTF-8 不得被当作成功");
+        let error = frame_payload(Message::Binary(vec![0xff, 0xfe].into()))
+            .expect_err("JSON 消费不得有损解码非法 UTF-8");
         assert!(matches!(error, TaosError::Unavailable(_)), "{error:?}");
+        assert!(error.to_string().contains("UTF-8"));
+    }
+
+    #[tokio::test]
+    async fn read_frame_preserves_text_and_binary_bytes() {
+        let bytes = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0xff, 42, 0,
+        ];
+        let expected_binary = Message::Binary(bytes.clone().into());
+        let mut binary_stream =
+            futures_util::stream::iter([Ok::<_, WsError>(expected_binary.clone())]);
+        let received = read_frame(&mut binary_stream)
+            .await
+            .expect("原始二进制数据帧");
+        assert_eq!(received, expected_binary);
+        match &received {
+            Message::Binary(actual) => assert_eq!(actual.as_ref(), bytes.as_slice()),
+            other => panic!("不得改变 Binary 类型：{}", frame_kind(other)),
+        }
+        let error = frame_payload(received).expect_err("仅 JSON 消费阶段拒绝非法 UTF-8");
+        assert!(matches!(error, TaosError::Unavailable(_)));
+        assert_eq!(
+            error.to_string(),
+            "远端暂时不可用: ws JSON 响应不是合法 UTF-8"
+        );
+
+        let expected_text = Message::Text(r#"{"code":0,"message":"合成"}"#.into());
+        let mut text_stream = futures_util::stream::iter([Ok::<_, WsError>(expected_text.clone())]);
+        let received = read_frame(&mut text_stream).await.expect("文本帧");
+        assert_eq!(received, expected_text);
+        assert!(matches!(&received, Message::Text(_)));
+        let payload = frame_payload(received).expect("合法 Text JSON");
+        assert_eq!(payload, r#"{"code":0,"message":"合成"}"#);
+        ensure_code_zero(&payload, "query").expect("合法状态");
+
+        let expected_binary = Message::Binary(br#"{"code":0}"#.to_vec().into());
+        let mut binary_stream =
+            futures_util::stream::iter([Ok::<_, WsError>(expected_binary.clone())]);
+        let received = read_frame(&mut binary_stream)
+            .await
+            .expect("合法 UTF-8 Binary");
+        assert_eq!(received, expected_binary);
+        let payload = frame_payload(received).expect("合法 Binary JSON");
+        assert_eq!(payload, r#"{"code":0}"#);
+        ensure_code_zero(&payload, "conn").expect("合法状态");
+    }
+
+    #[tokio::test]
+    async fn read_frame_defers_json_validation_to_consumer() {
+        let expected = Message::Binary(b"not json".to_vec().into());
+        let mut stream = futures_util::stream::iter([Ok::<_, WsError>(expected.clone())]);
+        let received = read_frame(&mut stream).await.expect("读取层不解释数据帧");
+        assert_eq!(received, expected);
+        let payload = frame_payload(received).expect("UTF-8 载荷");
+        assert_eq!(payload, "not json");
+        let error = ensure_code_zero(&payload, "query").expect_err("JSON 消费必须拒绝");
+        assert!(matches!(error, TaosError::Unavailable(_)));
+        assert!(!error.to_string().contains("not json"));
+    }
+
+    #[tokio::test]
+    async fn read_frame_rejects_control_eof_and_read_error() {
+        for control in [
+            Message::Ping(vec![0xff].into()),
+            Message::Pong(vec![0xff].into()),
+            Message::Close(None),
+        ] {
+            let mut stream = futures_util::stream::iter([Ok::<_, WsError>(control)]);
+            let error = read_frame(&mut stream).await.expect_err("控制帧必须拒绝");
+            assert!(matches!(error, TaosError::Unavailable(_)));
+            assert!(error.to_string().contains("帧类型非法"));
+        }
+        let mut empty = futures_util::stream::empty::<Result<Message, WsError>>();
+        let error = read_frame(&mut empty).await.expect_err("EOF 不得伪造数据");
+        assert!(matches!(error, TaosError::Unavailable(_)));
+        assert!(error.to_string().contains("响应流已结束"));
+        let mut failed = futures_util::stream::iter([Err::<Message, _>(WsError::ConnectionClosed)]);
+        let error = read_frame(&mut failed).await.expect_err("读错误必须拒绝");
+        assert!(matches!(error, TaosError::Unavailable(_)));
+        assert!(error.to_string().contains("ws 读失败"));
     }
 
     #[test]
