@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 特性 009：新增 `exec_sql_ws_rows(&config, sql)` 与 `TaosPool::exec_sql_ws_rows(sql)`，在单条 WS 短会话上
+  `conn` → `query` → `fetch` / `fetch_block` 直到 `completed:true`，返回完整结果集 `WsQueryResult`
+  （列名、类型码、精度、`WsValue` 行值）。`exec_sql_ws` 签名与语义不变。
+  - 所有请求带客户端 `req_id` 并校验回显；`fetch_block` Binary 帧按头内结果集 `id` 路由，走独立字节通道；
+    Text JSON 错误帧按错误处理。
+  - `completed:true` / `fetch` 出错不再发 `free_result`；其余中途放弃发 `free_result` 且不等待。
+  - raw block V3 解码：校验实测 `version=1` / `flag=0x80000000`、`length` 等于实际块长、列边界；列后尾部字节忽略
+    （真实块带 1 字节尾部）；DECIMAL / DECIMAL64 / BLOB / MEDIUMBLOB 返回 `TaosError::Unsupported`。
+  - 测试：解码层合成块 + 真实夹具 `tests/fixtures/fetch-block-20261012.bin` 回归；`tests/ws_rows_mock.rs`
+    mock 端到端覆盖正常读完、`fetch_block` 错误帧、中途放弃与释放语义。
+
 ### 修复
 
 - `exec_sql_ws` 的 conn / query 响应若为非法 UTF-8 的 Binary 帧，原先经有损解码后可能被当作成功；现一律返回

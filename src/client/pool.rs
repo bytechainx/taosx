@@ -259,6 +259,14 @@ impl TaosPool {
         native::exec_sql_ws(self.config(), sql).await
     }
 
+    /// 通过 Native WS 读取一条查询的完整结果集（`fetch` / `fetch_block` 直到读完）。
+    ///
+    /// 语义见 [`crate::exec_sql_ws_rows`]；与 [`TaosPool::exec_sql_ws`] 一样是独立短会话，
+    /// 不占用 REST 连接池。
+    pub async fn exec_sql_ws_rows(&self, sql: &str) -> TaosResult<native::WsQueryResult> {
+        native::exec_sql_ws_rows(self.config(), sql).await
+    }
+
     /// 写入序列前确保超级表存在（`ts TIMESTAMP, bid NCHAR(64), ask NCHAR(64)`）。
     pub async fn ensure_stable(&self, table: &str) -> TaosResult<()> {
         validate_stable_ident(table)?;

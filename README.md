@@ -87,6 +87,7 @@ Basic 认证；请求/响应体大小都受 `batch_max_bytes` / `max_response_by
 | `validate_mode(&config)` | 校验配置 + 传输模式一致性 |
 | `connect_native_ws(&config)` | 有 deadline 的握手探测，成功即关闭 |
 | `exec_sql_ws(&config, sql)` | 短会话两步协议：`conn` 建会话 → `query` → 读元数据帧 → 关闭 |
+| `exec_sql_ws_rows(&config, sql)` | 完整结果读取：`conn` → `query` → `fetch` / `fetch_block` 直到 `completed:true`，返回 `WsQueryResult`（列名、类型码、精度、行值） |
 | `probe_native_tcp(&config, port)` | 原生 SQL 端口（默认 6030）可达性探测，不发协议帧 |
 
 `TaosPool::new` **不发网**（`validate` + 装配 HTTP 客户端；若配置了 `tls_ca_file` 会同步读 PEM）。`TaosPool::connect` **会发网**：`NativeWs` 先做
@@ -98,9 +99,10 @@ WS 握手探测；`database` 非空时经 REST 建库并探测精度；两种模
 `code` 非整数、以及既非 `Text` 也非 `Binary` 的帧（`Ping`/`Pong`/`Close`）一律
 fail-closed 为 `TaosError::Unavailable`；凭据与服务端 `message` 文本均不入日志与错误消息。
 
-> **阶段 1 边界**：只完成 `conn` 握手 + `query` 元数据帧 + 状态码错误映射。**结果行需在
-> `query` 之后另发 `fetch`，本阶段不实现**，因此 `exec_sql_ws` 的返回值**不含结果行**，
-> 不得据此声称已支持完整结果读取。
+> **阶段 1 边界**：`exec_sql_ws` 只完成 `conn` 握手 + `query` 元数据帧 + 状态码错误映射，
+> 返回值**不含结果行**。完整结果读取用 `exec_sql_ws_rows`（特性 009）：单连接同步读取，
+> raw block 只支持 TDengine 3.x V3 格式（`version=1`、`flag=0x80000000`，实测值），
+> DECIMAL / DECIMAL64 / BLOB / MEDIUMBLOB 明确返回 `TaosError::Unsupported`。
 
 ## SQL 注入防护
 

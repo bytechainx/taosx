@@ -6,9 +6,16 @@
 //! 「有 deadline 的短会话」：`conn` → `query` → 读元数据帧 → 关闭；不维持连接池，
 //! 因此不引入额外的连接状态机。
 //!
-//! **阶段 1 边界**：只完成 `conn` 握手、`query` 元数据响应帧与状态码错误映射。
-//! 结果行需在 `query` 之后另发 `fetch`（必要时 `fetch_block` / `free_result`）并解码
-//! 二进制块，本阶段**不实现**，故不得声称已支持完整结果读取。
+//! **阶段 1 边界**（[`exec_sql_ws`]）：只完成 `conn` 握手、`query` 元数据响应帧与状态码
+//! 错误映射，返回值不含结果行。
+//!
+//! **阶段 2**（特性 009，[`exec_sql_ws_rows`]）：同一连接上 `fetch` → `fetch_block` 循环
+//! 直到 `completed:true`，按 raw block V3 解码出全部行；`fetch_block` 二进制帧走独立字节
+//! 通道，不经 `frame_payload`。仍为单连接同步短会话，不含连接池或跨连接并发；不支持
+//! TDengine 2.x V2 块格式，DECIMAL / BLOB 等未确认布局的类型明确返回不支持。
+//!
+//! - `raw_block`：V3 块解码与结果值类型；
+//! - `rows`：结果集会话状态机（`req_id` 配对、`id` 路由、`free_result` 语义）。
 
 use futures_util::{SinkExt, Stream, StreamExt};
 use tokio_tungstenite::connect_async;
@@ -19,6 +26,12 @@ use tracing::debug;
 
 use crate::config::{TaosConfig, TransportMode};
 use crate::error::{TaosError, TaosResult};
+
+mod raw_block;
+mod rows;
+
+pub use raw_block::{WsQueryResult, WsValue};
+pub use rows::exec_sql_ws_rows;
 
 /// 构建原生 WS URL（委托配置的 `native_ws_url`，纯函数）。
 ///
@@ -83,7 +96,7 @@ pub async fn connect_native_ws(config: &TaosConfig) -> TaosResult<()> {
 ///
 /// WS 路径与 REST 路径共用同一响应体积限额策略：帧与消息上限均绑定
 /// `config.max_response_bytes`，防止服务端超大帧导致无界内存放大。
-/// 仅供 [`exec_sql_ws`]（需要读取数据帧）使用；[`connect_native_ws`] 只做
+/// 仅供 [`exec_sql_ws`] / [`exec_sql_ws_rows`]（需要读取数据帧）使用；[`connect_native_ws`] 只做
 /// 握手探测、不读数据帧，保持默认配置。
 fn ws_config_from(config: &TaosConfig) -> WebSocketConfig {
     // WebSocketConfig 为 #[non_exhaustive]，跨 crate 须经 default() 后赋值字段。
@@ -114,8 +127,8 @@ fn ws_config_from(config: &TaosConfig) -> WebSocketConfig {
 /// WS 帧/消息大小上限与 `config.max_response_bytes` 联动（见 [`ws_config_from`]），
 /// 与 REST 路径的响应限额策略一致；超限帧由底层直接报错而非静默截断。
 ///
-/// **边界**：返回值是 `query` 的**元数据响应帧**，**不含结果行**——结果行需在 `query`
-/// 之后另发 `fetch`，本阶段未实现。协议细节随服务端版本而异。
+/// **边界**：返回值是 `query` 的**元数据响应帧**，**不含结果行**；需要结果行请用
+/// [`exec_sql_ws_rows`]。协议细节随服务端版本而异。
 pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
     config.validate()?;
     if sql.trim().is_empty() {
@@ -143,7 +156,7 @@ pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
         ensure_code_zero(&conn_frame, "conn")?;
 
         // 第 2 步：`query`。响应帧含字段元数据（`fields_names` / `fields_types` / …），
-        // 但不含结果行——结果行需另发 `fetch`（阶段 1 未实现）。
+        // 但不含结果行——结果行需另发 `fetch`（见 `exec_sql_ws_rows`）。
         let query_payload = serde_json::json!({
             "action": "query",
             "args": { "sql": sql },

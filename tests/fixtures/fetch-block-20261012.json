@@ -1,0 +1,49 @@
+{
+  "_synthetic": false,
+  "_note": "真实服务端 fetch_block 二进制帧原样字节（2026-10-12，Owner 授权的本机只读探测）。不得删改尾字节；由此派生的畸形样本须另标 _synthetic: true。",
+  "source": {
+    "endpoint": "ws://127.0.0.1:6041/rest/ws",
+    "server_version": "3.3.6.0",
+    "sql": "select server_version(),now(),1,1.5,'a'",
+    "captured_at_utc": "2026-10-12T04:01:45Z"
+  },
+  "binary": {
+    "file": "fetch-block-20261012.bin",
+    "bytes": 137,
+    "sha256": "29a89aa5c723e1eec6c6f64040f22cb670f3fa3958eaa1715d79d7fc198de168"
+  },
+  "query": {
+    "id": 1,
+    "fields_count": 5,
+    "fields_names": ["server_version()", "now()", "1", "1.5", "'a'"],
+    "fields_types": [8, 9, 5, 7, 8],
+    "precision": 0
+  },
+  "fetch": {
+    "rows": 1,
+    "lengths": [9, 8, 8, 8, 3],
+    "completed": false
+  },
+  "frame_header": {
+    "timing_ns": 37569,
+    "id": 1
+  },
+  "raw_block": {
+    "offset_in_frame": 16,
+    "version": 1,
+    "length": 121,
+    "nrows": 1,
+    "ncols": 5,
+    "flag": 2147483648,
+    "group_id": 0,
+    "col_info": [[8, 9], [9, 8], [5, 8], [7, 8], [8, 3]],
+    "col_lengths": [9, 8, 8, 8, 3],
+    "columns_end_offset": 120,
+    "trailing_bytes_hex": "00",
+    "_trailing_note": "列解析结束于块内偏移 120，块长 121，剩 1 字节 0x00；来源未确认。官方 taosadapter driver/common/parser/block.go ReadBlock 按列顺序解析、不检查尾部剩余字节。解码器应保留总长与列边界校验，忽略列之后、块长之内的剩余字节。"
+  },
+  "expected_rows": [
+    ["3.3.6.0", 1791777705997, 1, 1.5, "a"]
+  ],
+  "_expected_note": "第 2 列为 TIMESTAMP 原始 i64（precision 0 = 毫秒，即 2026-10-12T04:01:45.997Z）；第 3 列为 BIGINT。"
+}

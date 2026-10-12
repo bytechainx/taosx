@@ -9,13 +9,13 @@
 use std::time::Duration;
 
 use taosx::{
-    build_insert_sql_chunks, build_native_ws_url, connect_native_ws, exec_sql_ws, probe_native_tcp,
-    validate_mode, ws_probe_totals, BatchWritePartialError, BatchWriteReport, BatcherCloseError,
-    BatcherCloseReport, RetryPolicy, TaosClient, TaosConfig, TaosConfigBuilder, TaosError,
-    TaosExecResult, TaosHealth, TaosMetricsSnapshot, TaosPoint, TaosPool, TaosPoolStats,
+    build_insert_sql_chunks, build_native_ws_url, connect_native_ws, exec_sql_ws, exec_sql_ws_rows,
+    probe_native_tcp, validate_mode, ws_probe_totals, BatchWritePartialError, BatchWriteReport,
+    BatcherCloseError, BatcherCloseReport, RetryPolicy, TaosClient, TaosConfig, TaosConfigBuilder,
+    TaosError, TaosExecResult, TaosHealth, TaosMetricsSnapshot, TaosPoint, TaosPool, TaosPoolStats,
     TaosQueryStream, TaosResult, TransportMode, TsPrecision, WriteBatcher, WriteBatcherConfig,
-    HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS, HARD_MAX_CLOSE_TIMEOUT, HARD_MAX_IN_FLIGHT,
-    HARD_MAX_QUERY_ROWS, HARD_MAX_RESPONSE_BYTES,
+    WsQueryResult, WsValue, HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS, HARD_MAX_CLOSE_TIMEOUT,
+    HARD_MAX_IN_FLIGHT, HARD_MAX_QUERY_ROWS, HARD_MAX_RESPONSE_BYTES,
 };
 
 #[test]
@@ -42,6 +42,8 @@ fn public_types_are_send_and_sync() {
     assert_send_sync::<TaosMetricsSnapshot>();
     assert_send_sync::<TransportMode>();
     assert_send_sync::<TsPrecision>();
+    assert_send_sync::<WsQueryResult>();
+    assert_send_sync::<WsValue>();
 }
 
 #[test]
@@ -157,6 +159,7 @@ fn free_functions_are_reachable_from_crate_root() {
     let _ = build_native_ws_url;
     let _ = validate_mode;
     let _ = exec_sql_ws;
+    let _ = exec_sql_ws_rows;
     let _ = probe_native_tcp;
     let _ = build_insert_sql_chunks;
     let _ = ws_probe_totals;
