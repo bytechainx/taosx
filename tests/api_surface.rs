@@ -14,8 +14,8 @@ use taosx::{
     BatcherCloseError, BatcherCloseReport, RetryPolicy, TaosClient, TaosConfig, TaosConfigBuilder,
     TaosError, TaosExecResult, TaosHealth, TaosMetricsSnapshot, TaosPoint, TaosPool, TaosPoolStats,
     TaosQueryStream, TaosResult, TransportMode, TsPrecision, WriteBatcher, WriteBatcherConfig,
-    WsQueryResult, WsValue, HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS, HARD_MAX_CLOSE_TIMEOUT, HARD_MAX_IN_FLIGHT,
-    HARD_MAX_QUERY_ROWS, HARD_MAX_RESPONSE_BYTES,
+    WsQueryResult, WsValue, HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS, HARD_MAX_CLOSE_TIMEOUT,
+    HARD_MAX_IN_FLIGHT, HARD_MAX_QUERY_ROWS, HARD_MAX_RESPONSE_BYTES,
 };
 
 #[test]

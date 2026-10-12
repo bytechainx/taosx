@@ -237,7 +237,9 @@ pub(super) fn decode_raw_block(
         match fixed_width(kind)? {
             Some(width) => {
                 if col_bytes != width {
-                    return Err(malformed(&format!("第 {col} 列宽度 {col_bytes} 与类型不符")));
+                    return Err(malformed(&format!(
+                        "第 {col} 列宽度 {col_bytes} 与类型不符"
+                    )));
                 }
                 if nrows.checked_mul(width) != Some(col_length) {
                     return Err(malformed(&format!("第 {col} 列长与 nrows×宽度不符")));
@@ -378,8 +380,9 @@ fn variable_value(
                 return Err(malformed("NCHAR 长度不是 4 的倍数（UCS-4）"));
             }
             let mut text = String::with_capacity(len);
-            for chunk in bytes.chunks_exact(4) {
-                let scalar = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            // 上方已校验 len % 4 == 0，故 as_chunks 的余数部分必为空。
+            for chunk in bytes.as_chunks::<4>().0 {
+                let scalar = u32::from_le_bytes(*chunk);
                 text.push(
                     char::from_u32(scalar).ok_or_else(|| malformed("NCHAR 含非法 Unicode 标量"))?,
                 );
@@ -484,7 +487,10 @@ mod tests {
             kind: 4,
             width: 4,
             bitmap,
-            data: values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+            data: values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
         }
     }
 

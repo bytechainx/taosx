@@ -46,18 +46,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{FutureExt as _, StreamExt};
 use taosx::{
-    build_insert_sql_chunks, build_native_ws_url, connect_native_ws, exec_sql_ws, probe_native_tcp,
-    validate_mode, ws_probe_totals, BatchWritePartialError, BatchWriteReport, BatcherCloseError,
-    BatcherCloseReport, RetryPolicy, TaosClient, TaosConfig, TaosConfigBuilder, TaosError,
-    TaosExecResult, TaosHealth, TaosMetricsSnapshot, TaosPoint, TaosPool, TaosPoolStats,
+    build_insert_sql_chunks, build_native_ws_url, connect_native_ws, exec_sql_ws, exec_sql_ws_rows,
+    probe_native_tcp, validate_mode, ws_probe_totals, BatchWritePartialError, BatchWriteReport,
+    BatcherCloseError, BatcherCloseReport, RetryPolicy, TaosClient, TaosConfig, TaosConfigBuilder,
+    TaosError, TaosExecResult, TaosHealth, TaosMetricsSnapshot, TaosPoint, TaosPool, TaosPoolStats,
     TaosQueryStream, TaosResult, TransportMode, TsPrecision, WriteBatcher, WriteBatcherConfig,
-    DEFAULT_DATABASE, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_USER, ENV_ACQUIRE_TIMEOUT_MS,
-    ENV_BATCH_MAX_BYTES, ENV_BATCH_MAX_ROWS, ENV_CLOSE_TIMEOUT_MS, ENV_DATABASE, ENV_HOST,
-    ENV_HOSTS, ENV_MAX_IN_FLIGHT, ENV_MAX_QUERY_ROWS, ENV_MAX_RESPONSE_BYTES, ENV_PASSWORD,
-    ENV_PORT, ENV_PRECISION, ENV_PREFIX, ENV_TIMEOUT_MS, ENV_TLS, ENV_TLS_CA_FILE, ENV_TRANSPORT,
-    ENV_USER, ENV_WRITE_MAX_ATTEMPTS, HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS,
-    HARD_MAX_CLOSE_TIMEOUT, HARD_MAX_IN_FLIGHT, HARD_MAX_QUERY_ROWS, HARD_MAX_RESPONSE_BYTES,
-    HARD_MAX_TIMEOUT, HARD_MAX_WRITE_MAX_ATTEMPTS,
+    WsQueryResult, WsValue, DEFAULT_DATABASE, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_USER,
+    ENV_ACQUIRE_TIMEOUT_MS, ENV_BATCH_MAX_BYTES, ENV_BATCH_MAX_ROWS, ENV_CLOSE_TIMEOUT_MS,
+    ENV_DATABASE, ENV_HOST, ENV_HOSTS, ENV_MAX_IN_FLIGHT, ENV_MAX_QUERY_ROWS,
+    ENV_MAX_RESPONSE_BYTES, ENV_PASSWORD, ENV_PORT, ENV_PRECISION, ENV_PREFIX, ENV_TIMEOUT_MS,
+    ENV_TLS, ENV_TLS_CA_FILE, ENV_TRANSPORT, ENV_USER, ENV_WRITE_MAX_ATTEMPTS,
+    HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS, HARD_MAX_CLOSE_TIMEOUT, HARD_MAX_IN_FLIGHT,
+    HARD_MAX_QUERY_ROWS, HARD_MAX_RESPONSE_BYTES, HARD_MAX_TIMEOUT, HARD_MAX_WRITE_MAX_ATTEMPTS,
 };
 
 /// 公开面清单：`(条目类别, 入口 id)`，由 `cargo +nightly public-api --simplified` 派生并冻结。
@@ -93,6 +93,21 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("variant", "TsPrecision::Ms"),
     ("variant", "TsPrecision::Ns"),
     ("variant", "TsPrecision::Us"),
+    ("type", "WsQueryResult"),
+    ("field", "WsQueryResult::fields_names"),
+    ("field", "WsQueryResult::fields_types"),
+    ("field", "WsQueryResult::precision"),
+    ("field", "WsQueryResult::rows"),
+    ("type", "WsValue"),
+    ("variant", "WsValue::Bool"),
+    ("variant", "WsValue::Bytes"),
+    ("variant", "WsValue::Double"),
+    ("variant", "WsValue::Float"),
+    ("variant", "WsValue::Int"),
+    ("variant", "WsValue::Null"),
+    ("variant", "WsValue::Text"),
+    ("variant", "WsValue::Timestamp"),
+    ("variant", "WsValue::UInt"),
     ("fn", "TsPrecision::as_str"),
     ("fn", "TsPrecision::from_nanos"),
     ("fn", "TsPrecision::parse"),
@@ -227,6 +242,7 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("fn", "TaosPool::ensure_stable"),
     ("fn", "TaosPool::exec"),
     ("fn", "TaosPool::exec_sql_ws"),
+    ("fn", "TaosPool::exec_sql_ws_rows"),
     ("fn", "TaosPool::health_check"),
     ("fn", "TaosPool::is_closed"),
     ("fn", "TaosPool::liveness"),
@@ -306,6 +322,7 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("fn", "build_native_ws_url"),
     ("fn", "connect_native_ws"),
     ("fn", "exec_sql_ws"),
+    ("fn", "exec_sql_ws_rows"),
     ("fn", "probe_native_tcp"),
     ("fn", "validate_mode"),
     ("fn", "ws_probe_totals"),
@@ -696,6 +713,33 @@ fn phase_value_types() {
             Some(mode),
             "{mode:?} 的 as_str 输出必须能被 parse 接受"
         );
+    }
+
+    // —— WsValue：9 个变体逐个构造（真实服务一次查询无法稳定产出全部类型）——
+    hit("type", "WsValue");
+    let ws_values = [
+        ("WsValue::Null", WsValue::Null),
+        ("WsValue::Bool", WsValue::Bool(true)),
+        ("WsValue::Int", WsValue::Int(-1)),
+        ("WsValue::UInt", WsValue::UInt(1)),
+        ("WsValue::Float", WsValue::Float(1.5)),
+        ("WsValue::Double", WsValue::Double(1.5)),
+        (
+            "WsValue::Timestamp",
+            WsValue::Timestamp {
+                value: 0,
+                precision: TsPrecision::Ms,
+            },
+        ),
+        ("WsValue::Text", WsValue::Text("e2e".into())),
+        ("WsValue::Bytes", WsValue::Bytes(vec![0, 0xff])),
+    ];
+    for (index, (id, value)) in ws_values.iter().enumerate() {
+        hit("variant", id);
+        // 变体两两不等，证明 PartialEq 不会把不同类型的值混为一谈。
+        for (other_index, (_, other)) in ws_values.iter().enumerate() {
+            assert_eq!(value == other, index == other_index, "{id}");
+        }
     }
 
     hit("type", "TsPrecision");
@@ -1852,6 +1896,25 @@ async fn phase_rest_transport(configs: &E2EConfigs, registry: &ResourceRegistry)
     assert!(pool.ping().await.is_err(), "close 后必须拒绝新请求");
 }
 
+/// 断言 `SELECT 1, 'e2e'` 的完整结果：一行两列，BIGINT 与 VARCHAR（09 research §4 实测整数字面量为 BIGINT）。
+fn assert_ws_rows(result: &WsQueryResult) {
+    hit("type", "WsQueryResult");
+    hit("field", "WsQueryResult::fields_names");
+    assert_eq!(result.fields_names.len(), 2);
+    hit("field", "WsQueryResult::fields_types");
+    assert_eq!(result.fields_types, vec![5, 8]);
+    hit("field", "WsQueryResult::precision");
+    assert!(matches!(
+        result.precision,
+        TsPrecision::Ms | TsPrecision::Us | TsPrecision::Ns
+    ));
+    hit("field", "WsQueryResult::rows");
+    assert_eq!(
+        result.rows,
+        vec![vec![WsValue::Int(1), WsValue::Text("e2e".into())]]
+    );
+}
+
 /// 解析 `exec_sql_ws` 返回的 `query` 元数据帧并断言其结构。
 ///
 /// 为什么不再只断言「非空首帧」：非空文本无法证明拿到的是 `query` 元数据
@@ -1948,6 +2011,20 @@ async fn phase_native_transport(configs: &E2EConfigs, registry: &ResourceRegistr
         .expect("自由函数 WS 会话必须收到 query 元数据帧");
     assert_ws_query_metadata(&free_frame, 1);
     assert!(exec_sql_ws(&configs.native, "   ").await.is_err());
+
+    // 完整结果读取：池方法与自由函数各一次，常量查询的结果可精确断言。
+    hit("fn", "TaosPool::exec_sql_ws_rows");
+    let pool_rows = pool
+        .exec_sql_ws_rows("SELECT 1, 'e2e'")
+        .await
+        .expect("WS 完整结果读取必须成功");
+    assert_ws_rows(&pool_rows);
+    hit("fn", "exec_sql_ws_rows");
+    let free_rows = exec_sql_ws_rows(&configs.native, "SELECT 1, 'e2e'")
+        .await
+        .expect("自由函数 WS 完整结果读取必须成功");
+    assert_ws_rows(&free_rows);
+    assert!(exec_sql_ws_rows(&configs.native, "   ").await.is_err());
 
     hit("fn", "ws_probe_totals");
     let (ok, err) = ws_probe_totals();

@@ -3,8 +3,9 @@
 //! 协议依据 03a §1–§3、§6：`conn` → `query` → 循环 {`fetch` → `fetch_block`} 直到
 //! `fetch` 回 `completed:true`。要点：
 //!
-//! - **req_id**：所有请求带客户端自增 `req_id`，JSON 响应（含错误帧）必须原样回显，
-//!   否则视为配对失败（fail-closed）。
+//! - **req_id**：所有请求带客户端自增 `req_id`；`code == 0` 的 JSON 响应必须原样回显，
+//!   否则视为配对失败（fail-closed）。`code != 0` 的错误帧先按错误返回，不再核对
+//!   `req_id`：结果同为失败，配对与否不改变调用方看到的结论。
 //! - **id × req_id 路由**：`fetch_block` 成功响应是 Binary 帧，只含 16 字节头
 //!   （`timing` u64 LE + 结果集句柄 `id` u64 LE），不含 `req_id`；本连接一次只有一个
 //!   在途请求，故按「头内 `id` → 在途 `fetch_block` 的 `req_id`」关联（`InFlightBlock`）。
@@ -43,9 +44,9 @@ struct EchoReply {
 }
 
 /// `query` 成功响应中本模块用到的字段（未知字段忽略）。
+/// `req_id` 配对已在 [`RowsSession::read_json`] 经 `EchoReply` 校验，此处不重复解析。
 #[derive(Deserialize)]
 struct QueryReply {
-    req_id: Option<u64>,
     id: Option<u64>,
     #[serde(default)]
     is_update: bool,
@@ -205,9 +206,11 @@ fn result_meta(query: QueryReply) -> TaosResult<(u64, ResultMeta)> {
             "ws query 响应列元数据不一致".to_owned(),
         ));
     }
-    let precision = precision_from_code(query.precision.ok_or_else(|| {
-        TaosError::Unavailable("ws query 响应缺少 precision".to_owned())
-    })?)?;
+    let precision = precision_from_code(
+        query
+            .precision
+            .ok_or_else(|| TaosError::Unavailable("ws query 响应缺少 precision".to_owned()))?,
+    )?;
     Ok((
         id,
         ResultMeta {
@@ -304,11 +307,7 @@ where
             }
             let block_rows = match reply.rows {
                 Some(count) if count > 0 => count,
-                _ => {
-                    return Err(TaosError::Unavailable(
-                        "ws fetch 未完成却无行数".to_owned(),
-                    ))
-                }
+                _ => return Err(TaosError::Unavailable("ws fetch 未完成却无行数".to_owned())),
             };
             let lengths = reply
                 .lengths
@@ -394,7 +393,9 @@ fn ensure_req_id(echo: Option<u64>, sent: u64, action: &str) -> TaosResult<()> {
 fn route_block_frame<'f>(frame: &'f [u8], in_flight: &InFlightBlock) -> TaosResult<&'f [u8]> {
     let (header, block) = frame
         .split_at_checked(BLOCK_FRAME_HEADER_LEN)
-        .ok_or_else(|| TaosError::Unavailable("ws fetch_block 二进制帧短于 16 字节头".to_owned()))?;
+        .ok_or_else(|| {
+            TaosError::Unavailable("ws fetch_block 二进制帧短于 16 字节头".to_owned())
+        })?;
     let mut id_bytes = [0u8; 8];
     id_bytes.copy_from_slice(&header[8..16]);
     let id = u64::from_le_bytes(id_bytes);
@@ -419,9 +420,7 @@ fn fetch_block_text_error(text: &str, in_flight: &InFlightBlock) -> TaosError {
                 .map(|echo| echo.req_id == Some(in_flight.req_id))
                 .unwrap_or(false);
             let suffix = if paired { "" } else { "（req_id 不配对）" };
-            TaosError::Unavailable(format!(
-                "ws fetch_block 被服务端拒绝: code={code}{suffix}"
-            ))
+            TaosError::Unavailable(format!("ws fetch_block 被服务端拒绝: code={code}{suffix}"))
         }
         Err(error) => error,
     }

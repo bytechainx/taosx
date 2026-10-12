@@ -20,9 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
-use taosx::{
-    exec_sql_ws_rows, TaosConfig, TaosError, TransportMode, TsPrecision, WsValue,
-};
+use taosx::{exec_sql_ws_rows, TaosConfig, TaosError, TransportMode, TsPrecision, WsValue};
 
 const NOTE: &str = "离线 mock 合成帧，仅验证 fetch / fetch_block / free_result 状态机";
 
@@ -57,7 +55,9 @@ async fn start_rows_mock(mut respond: Responder) -> (u16, JoinHandle<Vec<Value>>
             };
             let request: Value = serde_json::from_str(text.as_str()).expect("客户端请求为 JSON");
             let action = request["action"].as_str().expect("action").to_owned();
-            let req_id = request["args"]["req_id"].as_u64().expect("每个请求都带 req_id");
+            let req_id = request["args"]["req_id"]
+                .as_u64()
+                .expect("每个请求都带 req_id");
             let count = counts.entry(action.clone()).or_insert(0);
             let replies = respond(&action, req_id, *count);
             *count += 1;
@@ -209,11 +209,14 @@ async fn rows_read_until_completed_without_free_result() {
 /// fetch_block 回 Text JSON 错误帧：按错误处理（不当二进制块解析），服务端消息不外泄。
 #[tokio::test]
 async fn fetch_block_text_error_frame_is_error() {
-    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, nth: usize| match action {
-        "fetch_block" => error_frame("fetch_block", req_id, 65535),
-        _ => happy_path(action, req_id, nth),
-    }))
-    .await;
+    let (port, handle) =
+        start_rows_mock(Box::new(
+            |action: &str, req_id: u64, nth: usize| match action {
+                "fetch_block" => error_frame("fetch_block", req_id, 65535),
+                _ => happy_path(action, req_id, nth),
+            },
+        ))
+        .await;
     let error = exec_sql_ws_rows(&ws_config(port), "select 1")
         .await
         .expect_err("fetch_block 错误帧必须报错");
@@ -234,11 +237,14 @@ async fn fetch_block_text_error_frame_is_error() {
 /// 本地中途放弃（超 max_query_rows）：发 free_result 且不等待响应（mock 永不回帧）。
 #[tokio::test]
 async fn abandon_sends_free_result_without_waiting() {
-    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, nth: usize| match action {
-        "fetch" => fetch_rows(req_id, 2),
-        _ => happy_path(action, req_id, nth),
-    }))
-    .await;
+    let (port, handle) =
+        start_rows_mock(Box::new(
+            |action: &str, req_id: u64, nth: usize| match action {
+                "fetch" => fetch_rows(req_id, 2),
+                _ => happy_path(action, req_id, nth),
+            },
+        ))
+        .await;
     let config = TaosConfig {
         max_query_rows: 1,
         ..ws_config(port)
@@ -265,11 +271,14 @@ async fn abandon_sends_free_result_without_waiting() {
 /// fetch 出错：服务端已释放结果集，不得再发 free_result。
 #[tokio::test]
 async fn fetch_error_means_released_without_free_result() {
-    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, nth: usize| match action {
-        "fetch" => error_frame("fetch", req_id, 9732),
-        _ => happy_path(action, req_id, nth),
-    }))
-    .await;
+    let (port, handle) =
+        start_rows_mock(Box::new(
+            |action: &str, req_id: u64, nth: usize| match action {
+                "fetch" => error_frame("fetch", req_id, 9732),
+                _ => happy_path(action, req_id, nth),
+            },
+        ))
+        .await;
     let error = exec_sql_ws_rows(&ws_config(port), "select 1")
         .await
         .expect_err("fetch 错误必须报错");
@@ -282,32 +291,41 @@ async fn fetch_error_means_released_without_free_result() {
 /// 二进制帧头内 id 与在途 fetch_block 的结果集句柄不符：路由失败，fail-closed。
 #[tokio::test]
 async fn binary_frame_with_unknown_id_is_rejected() {
-    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, nth: usize| match action {
-        "fetch_block" => {
-            let mut frame = real_block_frame();
-            frame[8..16].copy_from_slice(&2u64.to_le_bytes());
-            vec![Message::Binary(frame.into())]
-        }
-        _ => happy_path(action, req_id, nth),
-    }))
-    .await;
+    let (port, handle) =
+        start_rows_mock(Box::new(
+            |action: &str, req_id: u64, nth: usize| match action {
+                "fetch_block" => {
+                    let mut frame = real_block_frame();
+                    frame[8..16].copy_from_slice(&2u64.to_le_bytes());
+                    vec![Message::Binary(frame.into())]
+                }
+                _ => happy_path(action, req_id, nth),
+            },
+        ))
+        .await;
     let error = exec_sql_ws_rows(&ws_config(port), "select 1")
         .await
         .expect_err("id 不符必须报错");
     assert!(matches!(error, TaosError::Unavailable(_)), "{error:?}");
     assert!(error.to_string().contains("id=2"), "{error}");
     let requests = recorded(handle).await;
-    assert_eq!(actions(&requests).last().map(String::as_str), Some("free_result"));
+    assert_eq!(
+        actions(&requests).last().map(String::as_str),
+        Some("free_result")
+    );
 }
 
 /// fetch 响应的 req_id 回显与请求不配对：fail-closed。
 #[tokio::test]
 async fn fetch_reply_with_mismatched_req_id_is_rejected() {
-    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, nth: usize| match action {
-        "fetch" => fetch_rows(req_id + 100, 1),
-        _ => happy_path(action, req_id, nth),
-    }))
-    .await;
+    let (port, handle) =
+        start_rows_mock(Box::new(
+            |action: &str, req_id: u64, nth: usize| match action {
+                "fetch" => fetch_rows(req_id + 100, 1),
+                _ => happy_path(action, req_id, nth),
+            },
+        ))
+        .await;
     let error = exec_sql_ws_rows(&ws_config(port), "select 1")
         .await
         .expect_err("req_id 不配对必须报错");
@@ -319,35 +337,43 @@ async fn fetch_reply_with_mismatched_req_id_is_rejected() {
 /// 真实块的 version 被改写（派生畸形样本，合成）：解码层明确报错并 free_result。
 #[tokio::test]
 async fn malformed_block_is_serialization_error() {
-    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, nth: usize| match action {
-        "fetch_block" => {
-            let mut frame = real_block_frame();
-            frame[16..20].copy_from_slice(&9u32.to_le_bytes());
-            vec![Message::Binary(frame.into())]
-        }
-        _ => happy_path(action, req_id, nth),
-    }))
-    .await;
+    let (port, handle) =
+        start_rows_mock(Box::new(
+            |action: &str, req_id: u64, nth: usize| match action {
+                "fetch_block" => {
+                    let mut frame = real_block_frame();
+                    frame[16..20].copy_from_slice(&9u32.to_le_bytes());
+                    vec![Message::Binary(frame.into())]
+                }
+                _ => happy_path(action, req_id, nth),
+            },
+        ))
+        .await;
     let error = exec_sql_ws_rows(&ws_config(port), "select 1")
         .await
         .expect_err("version 不符必须报错");
     assert!(matches!(error, TaosError::Serialization(_)), "{error:?}");
     let requests = recorded(handle).await;
-    assert_eq!(actions(&requests).last().map(String::as_str), Some("free_result"));
+    assert_eq!(
+        actions(&requests).last().map(String::as_str),
+        Some("free_result")
+    );
 }
 
 /// 非查询语句（is_update）：不发 fetch，返回零行。
 #[tokio::test]
 async fn update_statement_returns_empty_without_fetch() {
-    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, _nth: usize| match action {
-        "conn" => conn_ok(req_id),
-        "query" => text(json!({
-            "_synthetic": true, "_note": NOTE,
-            "code": 0, "message": "", "action": "query", "req_id": req_id, "timing": 1,
-            "id": 0, "is_update": true, "affected_rows": 1, "fields_count": 0,
-            "fields_names": null, "fields_types": null, "fields_lengths": null, "precision": 0
-        })),
-        _ => Vec::new(),
+    let (port, handle) = start_rows_mock(Box::new(|action: &str, req_id: u64, _nth: usize| {
+        match action {
+            "conn" => conn_ok(req_id),
+            "query" => text(json!({
+                "_synthetic": true, "_note": NOTE,
+                "code": 0, "message": "", "action": "query", "req_id": req_id, "timing": 1,
+                "id": 0, "is_update": true, "affected_rows": 1, "fields_count": 0,
+                "fields_names": null, "fields_types": null, "fields_lengths": null, "precision": 0
+            })),
+            _ => Vec::new(),
+        }
     }))
     .await;
     let result = exec_sql_ws_rows(&ws_config(port), "insert into t values(now, 1)")
