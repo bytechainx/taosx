@@ -19,6 +19,9 @@
 //! 不做连接池或跨连接并发；整体超时（`config.timeout`）触发时直接丢弃连接，服务端随
 //! 会话断开回收结果集。
 
+use std::io::Write;
+use std::time::Instant;
+
 use futures_util::{Sink, SinkExt, Stream};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -96,7 +99,7 @@ struct RowsSession<'s, S> {
 /// 完整结果读取：连接 `/rest/ws`，`conn` → `query` → `fetch` / `fetch_block` 直到
 /// `completed:true`，返回列名、类型码、精度与全部行值。
 ///
-/// 与 [`crate::exec_sql_ws`] 并存：后者仍只返回 `query` 元数据帧。
+/// 与 [`crate::exec_sql_ws`] 复用同次读取；本入口只取类型化结果，不增加 JSON 转换。
 ///
 /// - 非查询语句（`query` 响应 `is_update:true`）不发 `fetch`，返回零行结果。
 /// - 累计行数受 `config.max_query_rows` 约束；累计块字节与变长值物化字节分别受
@@ -122,7 +125,7 @@ pub async fn exec_sql_ws_rows(config: &TaosConfig, sql: &str) -> TaosResult<WsQu
         if let Err(error) = socket.close(None).await {
             debug!(target: "taosx", %error, "ws 关闭失败（不覆盖读取结果）");
         }
-        result
+        result.map(|(_, rows)| rows)
     };
     match tokio::time::timeout(config.timeout, attempt).await {
         Ok(result) => {
@@ -138,11 +141,11 @@ pub async fn exec_sql_ws_rows(config: &TaosConfig, sql: &str) -> TaosResult<WsQu
 }
 
 /// 会话主流程；与连接建立/关闭解耦，便于对任意 Sink + Stream 驱动。
-async fn read_result_set<S>(
+pub(super) async fn read_result_set<S>(
     socket: &mut S,
     config: &TaosConfig,
     sql: &str,
-) -> TaosResult<WsQueryResult>
+) -> TaosResult<(serde_json::Map<String, serde_json::Value>, WsQueryResult)>
 where
     S: Sink<Message, Error = WsError> + Stream<Item = Result<Message, WsError>> + Unpin,
 {
@@ -151,19 +154,24 @@ where
         last_req_id: 0,
     };
     session.conn(config).await?;
-    let query = session.query(sql).await?;
+    let metadata = session.query(sql).await?;
+    let query: QueryReply = serde_json::from_value(serde_json::Value::Object(metadata.clone()))
+        .map_err(|_| TaosError::Unavailable("ws query 响应结构非法".to_owned()))?;
     if query.is_update {
         // 写入 / DDL 无结果集：服务端不保留句柄，无需 fetch 或 free_result。
         let precision = match query.precision {
             Some(code) => precision_from_code(code)?,
             None => TsPrecision::Ms,
         };
-        return Ok(WsQueryResult {
-            fields_names: Vec::new(),
-            fields_types: Vec::new(),
-            precision,
-            rows: Vec::new(),
-        });
+        return Ok((
+            metadata,
+            WsQueryResult {
+                fields_names: Vec::new(),
+                fields_types: Vec::new(),
+                precision,
+                rows: Vec::new(),
+            },
+        ));
     }
     let (id, meta) = result_meta(query)?;
     let mut handle = ResultHandle {
@@ -171,12 +179,15 @@ where
         server_released: false,
     };
     match session.fetch_all(&mut handle, &meta, config).await {
-        Ok(rows) => Ok(WsQueryResult {
-            fields_names: meta.fields_names,
-            fields_types: meta.fields_types,
-            precision: meta.precision,
-            rows,
-        }),
+        Ok(rows) => Ok((
+            metadata,
+            WsQueryResult {
+                fields_names: meta.fields_names,
+                fields_types: meta.fields_types,
+                precision: meta.precision,
+                rows,
+            },
+        )),
         Err(error) => {
             if !handle.server_released {
                 session.free_result(handle.id).await;
@@ -263,7 +274,7 @@ where
         Ok(())
     }
 
-    async fn query(&mut self, sql: &str) -> TaosResult<QueryReply> {
+    async fn query(&mut self, sql: &str) -> TaosResult<serde_json::Map<String, serde_json::Value>> {
         let mut args = serde_json::Map::new();
         args.insert("sql".to_owned(), sql.into());
         let req_id = self.send("query", args).await?;
@@ -423,5 +434,324 @@ fn fetch_block_text_error(text: &str, in_flight: &InFlightBlock) -> TaosError {
             TaosError::Unavailable(format!("ws fetch_block 被服务端拒绝: code={code}{suffix}"))
         }
         Err(error) => error,
+    }
+}
+
+/// 私有编码缓冲只接收限额内的实际 JSON 字节，逐次写入及结束时核 deadline。
+struct JsonOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+    deadline: Instant,
+    limit_exceeded: bool,
+}
+
+impl JsonOutput {
+    fn failure(&self) -> TaosError {
+        if Instant::now() >= self.deadline {
+            TaosError::Timeout("ws JSON 转换超时".to_owned())
+        } else if self.limit_exceeded {
+            TaosError::Unavailable("ws JSON 输出超过 max_response_bytes".to_owned())
+        } else {
+            TaosError::Serialization("ws JSON 输出编码失败".to_owned())
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> TaosResult<()> {
+        self.write_all(bytes).map_err(|_| self.failure())
+    }
+
+    fn finish(self) -> TaosResult<String> {
+        if Instant::now() >= self.deadline {
+            return Err(self.failure());
+        }
+        let deadline = self.deadline;
+        let text = String::from_utf8(self.bytes)
+            .map_err(|_| TaosError::Serialization("ws JSON 输出不是 UTF-8".to_owned()))?;
+        if Instant::now() >= deadline {
+            return Err(TaosError::Timeout("ws JSON 转换超时".to_owned()));
+        }
+        Ok(text)
+    }
+}
+
+impl Write for JsonOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if Instant::now() >= self.deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "JSON 转换超时",
+            ));
+        }
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.limit_exceeded = true;
+            return Err(std::io::Error::other("JSON 输出超过字节上限"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// 原 String 入口的本地表示；保留未知 query 元数据，仅替换 data 为完整结果行。
+pub(super) fn encode_result_json(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+    result: &WsQueryResult,
+    limit: usize,
+    deadline: Instant,
+) -> TaosResult<String> {
+    let mut output = JsonOutput {
+        bytes: Vec::new(),
+        limit,
+        deadline,
+        limit_exceeded: false,
+    };
+    output.append(b"{")?;
+    for (name, value) in metadata {
+        if name == "data" {
+            continue;
+        }
+        serde_json::to_writer(&mut output, name).map_err(|_| output.failure())?;
+        output.append(b":")?;
+        serde_json::to_writer(&mut output, value).map_err(|_| output.failure())?;
+        output.append(b",")?;
+    }
+    output.append(b"\"data\":[")?;
+    for (row_index, row) in result.rows.iter().enumerate() {
+        if row_index != 0 {
+            output.append(b",")?;
+        }
+        output.append(b"[")?;
+        for (column_index, value) in row.iter().enumerate() {
+            if column_index != 0 {
+                output.append(b",")?;
+            }
+            let encoded = match value {
+                WsValue::Null => serde_json::to_writer(&mut output, &serde_json::Value::Null),
+                WsValue::Bool(value) => serde_json::to_writer(&mut output, value),
+                WsValue::Int(value) => serde_json::to_writer(&mut output, value),
+                WsValue::UInt(value) => serde_json::to_writer(&mut output, value),
+                WsValue::Timestamp { value, .. } => serde_json::to_writer(&mut output, value),
+                WsValue::Text(value) => serde_json::to_writer(&mut output, value),
+                WsValue::Bytes(value) => serde_json::to_writer(&mut output, value),
+                WsValue::Float(value) => {
+                    if !value.is_finite() {
+                        return Err(TaosError::Serialization(
+                            "ws JSON 不接受非有限浮点数".to_owned(),
+                        ));
+                    }
+                    serde_json::to_writer(&mut output, value)
+                }
+                WsValue::Double(value) => {
+                    if !value.is_finite() {
+                        return Err(TaosError::Serialization(
+                            "ws JSON 不接受非有限浮点数".to_owned(),
+                        ));
+                    }
+                    serde_json::to_writer(&mut output, value)
+                }
+            };
+            encoded.map_err(|_| output.failure())?;
+        }
+        output.append(b"]")?;
+    }
+    output.append(b"]}")?;
+    output.finish()
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::WebSocketStream;
+
+    fn result(rows: Vec<Vec<WsValue>>) -> WsQueryResult {
+        WsQueryResult {
+            fields_names: Vec::new(),
+            fields_types: Vec::new(),
+            precision: TsPrecision::Ns,
+            rows,
+        }
+    }
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn json_output_maps_all_values_without_integer_rounding() {
+        let metadata = json!({"precision": 2, "unknown": {"kept": true}, "data": ["old"]})
+            .as_object()
+            .expect("对象")
+            .clone();
+        let values = result(vec![vec![
+            WsValue::Null,
+            WsValue::Bool(true),
+            WsValue::Int(i64::MIN),
+            WsValue::UInt(u64::MAX),
+            WsValue::Float(1.5),
+            WsValue::Double(-2.25),
+            WsValue::Timestamp {
+                value: i64::MAX,
+                precision: TsPrecision::Ns,
+            },
+            WsValue::Text("中\"\n".into()),
+            WsValue::Bytes(vec![0, 128, 255]),
+        ]]);
+        let body = encode_result_json(&metadata, &values, 4096, deadline()).expect("完整编码");
+        let decoded: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(
+            decoded,
+            json!({
+                "precision": 2, "unknown": {"kept": true},
+                "data": [[null, true, i64::MIN, u64::MAX, 1.5, -2.25, i64::MAX, "中\"\n", [0, 128, 255]]]
+            })
+        );
+        assert_eq!(metadata["data"], json!(["old"]));
+    }
+
+    #[test]
+    fn json_output_keeps_unknown_integer_beyond_u64() {
+        let metadata: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"extra":18446744073709551617}"#)
+                .expect("超出 u64 的 JSON 整数");
+        let output = encode_result_json(&metadata, &result(Vec::new()), 1024, deadline())
+            .expect("保留整数原值");
+        assert_eq!(output, r#"{"extra":18446744073709551617,"data":[]}"#);
+        assert!(metadata["extra"].is_number());
+        assert_eq!(metadata["extra"].to_string(), "18446744073709551617");
+    }
+
+    #[test]
+    fn json_output_budget_counts_metadata_escaping_and_bytes() {
+        let metadata = json!({"unknown": "\"\n中"})
+            .as_object()
+            .expect("对象")
+            .clone();
+        let values = result(vec![vec![
+            WsValue::Text("\"\n中".into()),
+            WsValue::Bytes(vec![255, 128, 0]),
+        ]]);
+        let full = encode_result_json(&metadata, &values, 4096, deadline()).expect("参考输出");
+        assert_eq!(
+            full,
+            "{\"unknown\":\"\\\"\\n中\",\"data\":[[\"\\\"\\n中\",[255,128,0]]]}"
+        );
+        assert_eq!(
+            encode_result_json(&metadata, &values, full.len(), deadline()).expect("恰好上限"),
+            full
+        );
+        assert!(matches!(
+            encode_result_json(&metadata, &values, full.len() - 1, deadline()),
+            Err(TaosError::Unavailable(_))
+        ));
+        assert!(matches!(
+            encode_result_json(&metadata, &values, 0, deadline()),
+            Err(TaosError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn json_output_rejects_non_finite_values() {
+        for value in [
+            WsValue::Float(f32::NAN),
+            WsValue::Float(f32::INFINITY),
+            WsValue::Float(f32::NEG_INFINITY),
+            WsValue::Double(f64::NAN),
+            WsValue::Double(f64::INFINITY),
+            WsValue::Double(f64::NEG_INFINITY),
+        ] {
+            assert!(matches!(
+                encode_result_json(
+                    &serde_json::Map::new(),
+                    &result(vec![vec![value]]),
+                    4096,
+                    deadline()
+                ),
+                Err(TaosError::Serialization(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn json_output_checks_expiry_before_writes_and_at_finish() {
+        assert!(matches!(
+            encode_result_json(
+                &serde_json::Map::new(),
+                &result(Vec::new()),
+                4096,
+                Instant::now()
+            ),
+            Err(TaosError::Timeout(_))
+        ));
+        let mut output = JsonOutput {
+            bytes: Vec::new(),
+            limit: 4096,
+            deadline: deadline(),
+            limit_exceeded: false,
+        };
+        output.append(b"{}").expect("期限内写入");
+        output.deadline = Instant::now();
+        assert!(matches!(output.finish(), Err(TaosError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn ddl_keeps_unknown_metadata_and_never_fetches() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let mut mock = tokio::spawn(async move {
+            let mut actions = Vec::new();
+            for stage in ["conn", "query"] {
+                let message = server.next().await.expect("请求存在").expect("请求可读");
+                let request: serde_json::Value =
+                    serde_json::from_str(message.to_text().expect("Text")).expect("JSON");
+                actions.push(request["action"].as_str().expect("action").to_owned());
+                assert_eq!(request["action"], stage);
+                let response = if stage == "query" {
+                    json!({"code": 0, "req_id": request["args"]["req_id"], "is_update": true, "affected_rows": 7, "unknown": "保留"})
+                } else {
+                    json!({"code": 0, "req_id": request["args"]["req_id"]})
+                };
+                server
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .expect("发送响应");
+            }
+            let close = server.next().await.expect("关闭帧").expect("关闭可读");
+            assert!(close.is_close(), "不得 fetch 或 free_result");
+            actions
+        });
+        let read = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_result_set(
+                &mut client,
+                &TaosConfig::default(),
+                "CREATE TABLE synthetic_table (value INT)",
+            ),
+        )
+        .await;
+        let _ = client.close(None).await;
+        let joined = tokio::time::timeout(Duration::from_secs(2), &mut mock).await;
+        if joined.is_err() {
+            mock.abort();
+            let _ = mock.await;
+            panic!("DDL mock 超时，句柄已收回");
+        }
+        let actions = joined.expect("mock 未超时").expect("mock 正常结束");
+        let (metadata, result) = read.expect("读取未超时").expect("DDL 成功");
+        assert!(result.rows.is_empty());
+        let body = encode_result_json(&metadata, &result, 4096, deadline()).expect("DDL 编码");
+        let output: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(
+            output,
+            json!({"code": 0, "req_id": 2, "is_update": true, "affected_rows": 7, "unknown": "保留", "data": []})
+        );
+        assert_eq!(actions, ["conn", "query"]);
     }
 }

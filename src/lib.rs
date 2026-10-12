@@ -8,11 +8,18 @@
 //! - **REST（默认）**：`reqwest` → `POST http(s)://host:port/rest/sql[/database]`，
 //!   默认端口 6041，Basic 认证。覆盖面最广，是数据读写的主路径。
 //! - **Native WebSocket**：`tokio-tungstenite` → `ws(s)://host:port/rest/ws`，
-//!   由 [`connect_native_ws`] 做握手探测、[`exec_sql_ws`] 执行短会话 SQL（只回元数据帧）、
-//!   [`exec_sql_ws_rows`] 读取完整结果集、
+//!   由 [`connect_native_ws`] 做握手探测、[`exec_sql_ws`] 返回同一次 query 元数据值与全部行的本地 JSON、
+//!   [`exec_sql_ws_rows`] 返回完整类型化结果集、
 //!   [`probe_native_tcp`] 探测原生端口。`TransportMode::NativeWs` 时
 //!   [`TaosPool::connect`] 会先完成一次 WS 握手探测；之后建库 / `exec` / `query`
 //!   仍走 REST。[`TaosPool::new`] 只校验配置，不发网。
+//!
+//! [`exec_sql_ws`] 保持 String 签名，不承诺原响应逐字保留；未知元数据值保留，
+//! `data` 替换为全部行数组，DDL 不 fetch 且 `data` 为空。Bytes 为字节值数组，
+//! Timestamp 为原整数并保留元数据 precision；整数不经浮点转换。
+//! 实际 JSON 编码字节含元数据与转义，受响应上限约束；非有限行值报序列化错误，
+//! 同步转换与末尾检查也受 timeout 约束。此本地表示不是 wire 字段承诺。
+//! typed 入口行为不变；当前 MAJOR 候选不代表发布或生产接受。
 //!
 //! # SQL 注入防护
 //!

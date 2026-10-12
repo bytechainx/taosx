@@ -11,7 +11,7 @@
 //! `code:65535`（"server not connected"）。本文件用本地 accept 侧 mock（无需新依赖）
 //! 覆盖四类判据：
 //!
-//! 1. 握手成功（`conn` `code 0` → `query` `code 0`）⇒ `Ok`，返回 query 元数据帧；
+//! 1. 握手成功（`conn` `code 0` → `query` `code 0`）⇒ `Ok`，保留 query 元数据并返回全部行；
 //! 2. 握手失败（`conn` 非 0）⇒ `Err`，且**不得**继续发 query；
 //! 3. 响应 `code` 非 0 ⇒ `Err`（原实现把 `code:65535` 信封当成功返回 = fail-open 缺陷）；
 //! 4. 状态字段缺失/畸形（非 JSON / 无 `code` / `code` 非整数 / 非数据帧）⇒ 一律 `Err`。
@@ -20,8 +20,7 @@
 //! 即 65535 信封，原实现把它原样当成功返回。其余用例的先红归因逐条写在各自文档注释里
 //! （③ 那条先红于「缺握手」，**不是**于错误信封）。
 //!
-//! **边界（阶段 1）**：只校验到 `query` 的元数据响应帧；结果行需另发 `fetch`，本阶段
-//! 未实现，用例不断言任何结果行语义。
+//! 成功路径读取合成 INT 块直到 completed，并保留源元数据；错误路径仍逐阶段拒绝。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,7 +46,7 @@ fn conn_ok_frame() -> Message {
 /// `query` 成功响应帧（P3 形态：含字段元数据，`id` 为会话内递增序号）。
 fn query_ok_frame() -> Message {
     Message::Text(
-        r#"{"code":0,"message":"","action":"query","id":1,"is_update":false,"affected_rows":0,"fields_count":1,"fields_names":["server_version()"],"fields_types":[8],"fields_lengths":[7],"precision":0}"#
+        r#"{"code":0,"message":"","action":"query","id":1,"is_update":false,"affected_rows":0,"fields_count":1,"fields_names":["server_version()"],"fields_types":[4],"fields_lengths":[4],"precision":0,"unknown_metadata":{"source":"原文","values":[true,null,17]}}"#
             .into(),
     )
 }
@@ -86,8 +85,30 @@ async fn start_ws_mock(batches: Vec<Vec<Message>>) -> (u16, Requests) {
             let Some(replies) = batches.get(index) else {
                 break;
             };
+            let request: serde_json::Value =
+                serde_json::from_str(message.to_text().expect("请求为文本")).expect("请求为 JSON");
+            let req_id = request["args"]["req_id"].as_u64().expect("请求须含 req_id");
             for reply in replies {
-                if ws.send(reply.clone()).await.is_err() {
+                let mut outgoing = reply.clone();
+                let payload = match reply {
+                    Message::Text(text) => {
+                        serde_json::from_str::<serde_json::Value>(text.as_str()).ok()
+                    }
+                    Message::Binary(bytes) => {
+                        serde_json::from_slice::<serde_json::Value>(bytes).ok()
+                    }
+                    _ => None,
+                };
+                if let Some(mut payload) = payload {
+                    payload["req_id"] = req_id.into();
+                    outgoing = match reply {
+                        Message::Binary(_) => {
+                            Message::Binary(payload.to_string().into_bytes().into())
+                        }
+                        _ => Message::Text(payload.to_string().into()),
+                    };
+                }
+                if ws.send(outgoing).await.is_err() {
                     break;
                 }
             }
@@ -126,7 +147,25 @@ fn json_requests(seen: &Requests) -> Vec<serde_json::Value> {
 /// 同时断言实现真的按「conn → query」顺序发送、且凭据取自配置。
 #[tokio::test]
 async fn conn_handshake_then_query_returns_metadata() {
-    let (port, seen) = start_ws_mock(vec![vec![conn_ok_frame()], vec![query_ok_frame()]]).await;
+    let (port, seen) = start_ws_mock(vec![
+        vec![conn_ok_frame()],
+        vec![query_ok_frame()],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":false,"rows":1,"lengths":[4]}"#.into(),
+        )],
+        vec![Message::Binary(
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 42, 0, 0, 0, 1, 0, 0,
+                0, 1, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 0, 0, 0, 4, 0, 0, 0, 0,
+                11, 0, 0, 0,
+            ]
+            .into(),
+        )],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":true}"#.into(),
+        )],
+    ])
+    .await;
     let config = ws_config(port);
 
     let body = exec_sql_ws(&config, SERVER_VERSION_QUERY)
@@ -143,11 +182,7 @@ async fn conn_handshake_then_query_returns_metadata() {
     );
 
     let requests = json_requests(&seen);
-    assert_eq!(
-        requests.len(),
-        2,
-        "必须先 conn 后 query 各一次: {requests:?}"
-    );
+    assert_eq!(requests.len(), 5, "必须完整读取并结束结果: {requests:?}");
     assert_eq!(requests[0]["action"], "conn", "第一帧必须是 conn 握手");
     assert_eq!(requests[0]["args"]["user"], config.user);
     assert_eq!(
@@ -156,6 +191,23 @@ async fn conn_handshake_then_query_returns_metadata() {
     );
     assert_eq!(requests[1]["action"], "query", "第二帧必须是 query");
     assert_eq!(requests[1]["args"]["sql"], SERVER_VERSION_QUERY);
+    let response: serde_json::Value = serde_json::from_str(&body).expect("完整输出 JSON");
+    assert_eq!(response["data"], serde_json::json!([[11]]));
+    assert_eq!(
+        response["unknown_metadata"],
+        serde_json::json!({"source":"原文","values":[true,null,17]})
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["action"].as_str().expect("action"))
+            .collect::<Vec<_>>(),
+        ["conn", "query", "fetch", "fetch_block", "fetch"]
+    );
+    for request in &requests[2..] {
+        assert_eq!(request["args"]["id"], 1);
+        assert!(request["args"]["req_id"].as_u64().is_some());
+    }
 }
 
 /// ② 握手失败：`conn` 回非 0 ⇒ `Err`，且不得继续发 query，错误消息不得含口令。
@@ -199,7 +251,7 @@ async fn conn_rejected_maps_to_err_without_leaking_password() {
 /// （畸形状态字段被当作成功）。
 #[tokio::test]
 async fn query_nonzero_code_is_error_not_success() {
-    let (port, _seen) =
+    let (port, seen) =
         start_ws_mock(vec![vec![conn_ok_frame()], vec![not_connected_frame()]]).await;
     let config = ws_config(port);
 
@@ -207,6 +259,8 @@ async fn query_nonzero_code_is_error_not_success() {
         .await
         .expect_err("query 非 0 code 必须失败（不得返回 Ok）");
 
+    assert_eq!(json_requests(&seen).len(), 2, "必须确实到达 query");
+    assert_eq!(json_requests(&seen)[1]["action"], "query");
     assert!(
         matches!(error, TaosError::Unavailable(_)),
         "非 0 code 必须映射为 Unavailable: {error:?}"
@@ -302,7 +356,7 @@ async fn non_integer_code_fails_closed() {
 /// ④-e query 阶段的元数据帧缺 `code` ⇒ `Err`（缺失判定对两步都生效）。
 #[tokio::test]
 async fn query_frame_without_code_fails_closed() {
-    let (port, _seen) = start_ws_mock(vec![
+    let (port, seen) = start_ws_mock(vec![
         vec![conn_ok_frame()],
         vec![Message::Text(
             r#"{"action":"query","id":1,"fields_names":["server_version()"]}"#.into(),
@@ -314,6 +368,8 @@ async fn query_frame_without_code_fails_closed() {
         .await
         .expect_err("query 帧缺 code 必须失败");
 
+    assert_eq!(json_requests(&seen).len(), 2, "必须确实到达 query");
+    assert_eq!(json_requests(&seen)[1]["action"], "query");
     assert!(
         matches!(error, TaosError::Unavailable(_)),
         "query 帧缺 code 必须映射为 Unavailable: {error:?}"
@@ -323,7 +379,7 @@ async fn query_frame_without_code_fails_closed() {
 /// ④-f query 阶段收到非数据帧（Ping）⇒ `Err`（fail-closed 对两步都生效）。
 #[tokio::test]
 async fn query_stage_non_data_frame_fails_closed() {
-    let (port, _seen) = start_ws_mock(vec![
+    let (port, seen) = start_ws_mock(vec![
         vec![conn_ok_frame()],
         vec![Message::Ping(Vec::new().into())],
     ])
@@ -333,6 +389,8 @@ async fn query_stage_non_data_frame_fails_closed() {
         .await
         .expect_err("query 阶段非数据帧必须 fail-closed");
 
+    assert_eq!(json_requests(&seen).len(), 2, "必须确实到达 query");
+    assert_eq!(json_requests(&seen)[1]["action"], "query");
     assert!(
         matches!(error, TaosError::Unavailable(_)),
         "query 阶段非数据帧必须映射为 Unavailable: {error:?}"

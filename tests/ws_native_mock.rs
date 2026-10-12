@@ -12,6 +12,7 @@
 //! 握手与错误映射的细分用例（非 0 code / 畸形状态字段 / P5 对照）见
 //! `tests/ws_conn_handshake.rs`。
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -27,9 +28,11 @@ fn conn_ok_frame() -> Message {
 }
 
 /// 启动本地 WS mock server：每收到一个客户端数据帧，就按序发送 `batches[i]`。
-async fn start_ws_mock(batches: Vec<Vec<Message>>) -> u16 {
+async fn start_ws_mock(batches: Vec<Vec<Message>>) -> (u16, Arc<Mutex<Vec<serde_json::Value>>>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
     tokio::spawn(async move {
         let Ok((stream, _)) = listener.accept().await else {
             return;
@@ -46,8 +49,31 @@ async fn start_ws_mock(batches: Vec<Vec<Message>>) -> u16 {
             let Some(replies) = batches.get(index) else {
                 break;
             };
+            let request: serde_json::Value =
+                serde_json::from_str(message.to_text().expect("请求为文本")).expect("请求为 JSON");
+            let req_id = request["args"]["req_id"].as_u64().expect("请求须含 req_id");
+            recorded.lock().expect("轨迹锁").push(request);
             for reply in replies {
-                if ws.send(reply.clone()).await.is_err() {
+                let mut outgoing = reply.clone();
+                let payload = match reply {
+                    Message::Text(text) => {
+                        serde_json::from_str::<serde_json::Value>(text.as_str()).ok()
+                    }
+                    Message::Binary(bytes) => {
+                        serde_json::from_slice::<serde_json::Value>(bytes).ok()
+                    }
+                    _ => None,
+                };
+                if let Some(mut payload) = payload {
+                    payload["req_id"] = req_id.into();
+                    outgoing = match reply {
+                        Message::Binary(_) => {
+                            Message::Binary(payload.to_string().into_bytes().into())
+                        }
+                        _ => Message::Text(payload.to_string().into()),
+                    };
+                }
+                if ws.send(outgoing).await.is_err() {
                     break;
                 }
             }
@@ -55,7 +81,7 @@ async fn start_ws_mock(batches: Vec<Vec<Message>>) -> u16 {
         }
         let _ = ws.close(None).await;
     });
-    port
+    (port, seen)
 }
 
 /// WS 配置（NativeWs + 短超时，便于离线 mock）。
@@ -69,14 +95,27 @@ fn ws_config(port: u16) -> TaosConfig {
     }
 }
 
-/// Text 帧：`conn`、`query` 均回 Text 帧，exec_sql_ws 应返回 query 帧内容。
+/// Text 帧：`conn`、`query` 均回 Text 帧，exec_sql_ws 应保留元数据并返回完整行。
 #[tokio::test]
 async fn ws_text_frame_returns_body() {
-    let query_text =
-        r#"{"code":0,"action":"query","id":1,"fields_names":["server_version()"],"rows":1}"#;
-    let port = start_ws_mock(vec![
+    let query_text = r#"{"code":0,"action":"query","id":1,"is_update":false,"fields_count":1,"fields_names":["server_version()"],"fields_types":[4],"fields_lengths":[4],"precision":0,"unknown_metadata":{"text":"源字段","value":17}}"#;
+    let (port, seen) = start_ws_mock(vec![
         vec![conn_ok_frame()],
         vec![Message::Text(query_text.into())],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":false,"rows":1,"lengths":[4]}"#.into(),
+        )],
+        vec![Message::Binary(
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 42, 0, 0, 0, 1, 0, 0,
+                0, 1, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 0, 0, 0, 4, 0, 0, 0, 0,
+                11, 0, 0, 0,
+            ]
+            .into(),
+        )],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":true}"#.into(),
+        )],
     ])
     .await;
     let config = ws_config(port);
@@ -85,21 +124,44 @@ async fn ws_text_frame_returns_body() {
         .await
         .expect("Text 帧必须返回成功");
 
+    let actual: serde_json::Value = serde_json::from_str(&body).expect("完整输出为 JSON");
+    let expected: serde_json::Value = serde_json::from_str(query_text).expect("合成元数据为 JSON");
+    for (key, value) in expected.as_object().expect("元数据对象") {
+        assert_eq!(&actual[key], value, "源元数据字段必须保真：{key}");
+    }
+    assert_eq!(actual["data"], serde_json::json!([[11]]));
+    let requests = seen.lock().expect("轨迹锁");
     assert_eq!(
-        body, query_text,
-        "exec_sql_ws 返回的 Text 帧内容必须与 mock 的 query 响应一致"
+        requests
+            .iter()
+            .map(|request| request["action"].as_str().expect("action"))
+            .collect::<Vec<_>>(),
+        ["conn", "query", "fetch", "fetch_block", "fetch"]
     );
 }
 
-/// Binary 帧：`conn` 回 Text、`query` 回 Binary，exec_sql_ws 应返回解码后的文本。
+/// Binary 帧：`conn` 回 Text、`query` 回 Binary，exec_sql_ws 应保留解码元数据并返回完整行。
 #[tokio::test]
 async fn ws_binary_frame_returns_decoded_body() {
-    let query_text =
-        r#"{"code":0,"action":"query","id":1,"fields_names":["server_version()"],"rows":1}"#;
+    let query_text = r#"{"code":0,"action":"query","id":1,"is_update":false,"fields_count":1,"fields_names":["server_version()"],"fields_types":[4],"fields_lengths":[4],"precision":0,"unknown_metadata":{"text":"源字段","value":17}}"#;
     let binary_bytes = query_text.as_bytes().to_vec();
-    let port = start_ws_mock(vec![
+    let (port, seen) = start_ws_mock(vec![
         vec![conn_ok_frame()],
         vec![Message::Binary(binary_bytes.into())],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":false,"rows":1,"lengths":[4]}"#.into(),
+        )],
+        vec![Message::Binary(
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 42, 0, 0, 0, 1, 0, 0,
+                0, 1, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 0, 0, 0, 4, 0, 0, 0, 0,
+                11, 0, 0, 0,
+            ]
+            .into(),
+        )],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":true}"#.into(),
+        )],
     ])
     .await;
     let config = ws_config(port);
@@ -108,9 +170,19 @@ async fn ws_binary_frame_returns_decoded_body() {
         .await
         .expect("Binary 帧必须返回成功");
 
+    let actual: serde_json::Value = serde_json::from_str(&body).expect("完整输出为 JSON");
+    let expected: serde_json::Value = serde_json::from_str(query_text).expect("合成元数据为 JSON");
+    for (key, value) in expected.as_object().expect("元数据对象") {
+        assert_eq!(&actual[key], value, "源元数据字段必须保真：{key}");
+    }
+    assert_eq!(actual["data"], serde_json::json!([[11]]));
+    let requests = seen.lock().expect("轨迹锁");
     assert_eq!(
-        body, query_text,
-        "exec_sql_ws 必须正确解码 Binary 帧的 UTF-8 内容"
+        requests
+            .iter()
+            .map(|request| request["action"].as_str().expect("action"))
+            .collect::<Vec<_>>(),
+        ["conn", "query", "fetch", "fetch_block", "fetch"]
     );
 }
 
@@ -120,10 +192,24 @@ async fn ws_conn_binary_invalid_utf8_fails_closed() {
         br#"{"code":0,"action":"conn","message":"synthetic-conn-payload-"#.to_vec();
     conn_bytes.push(0xff);
     conn_bytes.extend_from_slice(br#""}"#);
-    let query_text = r#"{"code":0,"action":"query","id":1,"rows":1}"#;
-    let port = start_ws_mock(vec![
+    let query_text = r#"{"code":0,"action":"query","id":1,"is_update":false,"fields_count":1,"fields_names":["synthetic_int"],"fields_types":[4],"fields_lengths":[4],"precision":0}"#;
+    let (port, _seen) = start_ws_mock(vec![
         vec![Message::Binary(conn_bytes.into())],
         vec![Message::Text(query_text.into())],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":false,"rows":1,"lengths":[4]}"#.into(),
+        )],
+        vec![Message::Binary(
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 42, 0, 0, 0, 1, 0, 0,
+                0, 1, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 0, 0, 0, 4, 0, 0, 0, 0,
+                11, 0, 0, 0,
+            ]
+            .into(),
+        )],
+        vec![Message::Text(
+            r#"{"code":0,"action":"fetch","id":1,"completed":true}"#.into(),
+        )],
     ])
     .await;
     let config = ws_config(port);
@@ -148,7 +234,7 @@ async fn ws_query_binary_invalid_utf8_fails_closed() {
         br#"{"code":0,"action":"query","message":"synthetic-query-payload-"#.to_vec();
     query_bytes.push(0xff);
     query_bytes.extend_from_slice(br#""}"#);
-    let port = start_ws_mock(vec![
+    let (port, seen) = start_ws_mock(vec![
         vec![conn_ok_frame()],
         vec![Message::Binary(query_bytes.into())],
     ])
@@ -165,6 +251,7 @@ async fn ws_query_binary_invalid_utf8_fails_closed() {
         rendered.contains("UTF-8"),
         "必须明确拒绝非法编码：{rendered}"
     );
+    assert_eq!(seen.lock().expect("轨迹锁")[1]["action"], "query");
     assert!(!rendered.contains("synthetic-query-payload"));
     assert!(!rendered.contains('\u{fffd}'));
 }
@@ -172,7 +259,7 @@ async fn ws_query_binary_invalid_utf8_fails_closed() {
 /// 非数据帧 fail-closed（握手阶段）：`conn` 响应不是 Text/Binary，必须返回 Err。
 #[tokio::test]
 async fn ws_non_data_frame_fails_closed() {
-    let port = start_ws_mock(vec![vec![Message::Close(None)]]).await;
+    let (port, _seen) = start_ws_mock(vec![vec![Message::Close(None)]]).await;
     let config = ws_config(port);
 
     let error = exec_sql_ws(&config, "SELECT 1")
@@ -192,7 +279,7 @@ async fn ws_non_data_frame_fails_closed() {
 /// Ping 帧（非 Text/Binary 非 Close）在握手阶段也应 fail-closed。
 #[tokio::test]
 async fn ws_ping_frame_fails_closed() {
-    let port = start_ws_mock(vec![vec![Message::Ping(vec![].into())]]).await;
+    let (port, _seen) = start_ws_mock(vec![vec![Message::Ping(vec![].into())]]).await;
     let config = ws_config(port);
 
     let error = exec_sql_ws(&config, "SELECT 1")

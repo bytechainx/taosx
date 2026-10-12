@@ -1,6 +1,6 @@
 # taosx 公开 API
 
-**版本 / 角色**：`taosx 0.1.5` · TDengine 异步客户端（REST + 原生 WebSocket 双传输）
+**版本 / 角色**：`taosx 1.0.0` MAJOR 候选 · TDengine 异步客户端（REST + 原生 WebSocket 双传输）；不代表发布或生产接受。
 
 ## 公开消费面
 
@@ -54,15 +54,28 @@ client.close().await?;
 ## 能力边界
 
 - 只做 TDengine 访问原语：连接、SQL 执行、批量写入、有界查询流；不含领域模型或业务编排。
-- `new` **不发网**（只 `validate` + 装配客户端）。`connect` **会发网**：`NativeWs` 先做 WS 握手；`database` 非空时经 REST 执行 `CREATE DATABASE IF NOT EXISTS` 并探测精度（与配置不一致则 fail-closed）；两种模式最后都 `ping`。主 `host` 失败则按 `hosts` 故障转移。默认库名 `infra_draft`、默认端口 `6041`。`NativeWs` 下 DDL/`exec`/`query` 仍走 REST。`exec_sql_ws` 仍只到 `query` 元数据帧，不含结果行；完整结果读取见下节 `exec_sql_ws_rows`。`query_series` 只收表名 + 纳秒闭区间，缺表返回空集。
+- `new` **不发网**（只 `validate` + 装配客户端）。`connect` **会发网**：`NativeWs` 先做 WS 握手；`database` 非空时经 REST 执行 `CREATE DATABASE IF NOT EXISTS` 并探测精度（与配置不一致则 fail-closed）；两种模式最后都 `ping`。主 `host` 失败则按 `hosts` 故障转移。默认库名 `infra_draft`、默认端口 `6041`。`NativeWs` 下 DDL/`exec`/`query` 仍走 REST。`exec_sql_ws` 返回同一次 query 元数据值与全部 `data` 行；typed 入口见下节 `exec_sql_ws_rows`。`query_series` 只收表名 + 纳秒闭区间，缺表返回空集。
 - 查询结果受 `HARD_MAX_QUERY_ROWS` / `HARD_MAX_RESPONSE_BYTES` 上界约束，超限报错而非静默截断。
 - 凭据（user/password）只从 env 或 builder 注入，`Debug` 输出脱敏。
 
-## WS 完整结果读取（`exec_sql_ws_rows`）
+## WS 完整结果读取（`exec_sql_ws` / `exec_sql_ws_rows`）
 
 `exec_sql_ws_rows(&config, sql)`（及 `TaosPool::exec_sql_ws_rows(sql)`）在一条专用 WS 短会话上执行
 `conn` → `query` → 循环 `fetch` / `fetch_block`，直到 `fetch` 回 `completed:true`，返回
-`WsQueryResult { fields_names, fields_types, precision, rows }`。`exec_sql_ws` 签名与语义不变。
+`WsQueryResult { fields_names, fields_types, precision, rows }`；typed 入口行为不变。
+
+`exec_sql_ws(&config, sql)` 及 `TaosPool::exec_sql_ws(sql)` 复用同一次 query 的完整读取链。
+String 签名保持 `TaosResult<String>`，但由仅元数据改为完整结果：保留同一次 query 的元数据值
+（包括未知字段），以本地 `data` 行数组替换该字段。不承诺原响应字符串逐字保留，
+也不把本地 `data` 当作 wire 协议字段。DDL 的更新结果不 fetch，保留元数据且 `data` 为 `[]`。
+
+整数不经浮点转换；Timestamp 输出原整数，精度仍由 query 元数据 `precision` 表示；
+Bytes 输出字节值数组，bool / text / null 对应 JSON 值。未知元数据数值启用
+`serde_json` 的 `arbitrary_precision` 保留原值，不舍入或字符串化。行值中的 NaN / Inf 返回
+`TaosError::Serialization`。最终 JSON 的实际编码字节（含元数据、转义与 Bytes 数组）另受
+`max_response_bytes` 约束，超限返回 `Unavailable`，不截断。整体 `timeout` 覆盖同步转换，
+每次写入与最终完成检查期限，过期返回 `Timeout`；成功计数仅在最终转换成功后增加一次。
+typed 入口的结果行为不变。
 
 - **配对与路由**：每个请求带客户端自增 `req_id`，JSON 响应必须原样回显；`fetch_block` 成功帧为
   Binary（16 字节头：`timing` u64 LE + 结果集句柄 `id` u64 LE），按头内 `id` 关联在途请求；失败为

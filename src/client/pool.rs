@@ -254,7 +254,12 @@ impl TaosPool {
         self.exec(sql).await
     }
 
-    /// 通过 Native WS 执行一条 SQL（短会话：握手 → 发送 → 关闭）。
+    /// 通过 Native WS 执行一条 SQL，返回同一次 query 元数据值与全部行的本地 JSON。
+    ///
+    /// String 签名不变，不承诺原响应逐字保留；未知元数据值保留，`data` 替换为行数组。
+    /// DDL 不 fetch 且 `data` 为空；Bytes 为字节值数组，Timestamp 保留原整数与 precision。
+    /// 实际 JSON 编码字节受响应上限约束，非有限行值报错，转换与末尾检查受 timeout 约束。
+    /// 完整语义见 [`crate::exec_sql_ws`]；不占用 REST 连接池，也不承诺 wire 含 `data`。
     pub async fn exec_sql_ws(&self, sql: &str) -> TaosResult<String> {
         native::exec_sql_ws(self.config(), sql).await
     }
