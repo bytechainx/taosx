@@ -396,8 +396,9 @@ fn variable_value(
 #[cfg(test)]
 mod tests {
     //! 解码层测试。合成块均按 03a §4 手工构造（代码内构造，等同 `_synthetic: true`，
-    //! 非服务端产物）；真实块回归读取 `tests/fixtures/fetch-block-20261012.bin`
-    //! （`_synthetic: false`）。
+    //! 非服务端产物）；真实块回归读取 `tests/fixtures/` 下三份 `_synthetic: false` 夹具
+    //! （单行 `fetch-block-20261012`、10 行 `rows-multiline-20261012`、NCHAR `rows-nchar-20261012`），
+    //! 每份都与其同名 `.json` 登记交叉核对。
     use super::*;
 
     /// 合成列：定长（位图 + 定宽数据）或变长（offsets + 数据段）。
@@ -494,12 +495,62 @@ mod tests {
         }
     }
 
+    fn fixture_path(file: &str) -> String {
+        format!("{}/tests/fixtures/{file}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn fixture_frame(file: &str) -> Vec<u8> {
+        let path = fixture_path(file);
+        std::fs::read(&path).unwrap_or_else(|error| panic!("读取真实夹具 {path}: {error}"))
+    }
+
+    fn fixture_json(file: &str) -> serde_json::Value {
+        let path = fixture_path(file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读取夹具登记 {path}: {error}"));
+        serde_json::from_str(&text).unwrap_or_else(|error| panic!("解析夹具登记 {path}: {error}"))
+    }
+
+    fn fixture_types(json: &serde_json::Value) -> Vec<u8> {
+        json["query"]["fields_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| u8::try_from(value.as_u64().unwrap()).unwrap())
+            .collect()
+    }
+
+    /// 登记 `expected_rows` 的一格 → `WsValue`（JSON null 即 SQL NULL）。
+    fn expected_ws_value(kind: u8, value: &serde_json::Value) -> WsValue {
+        if value.is_null() {
+            return WsValue::Null;
+        }
+        match kind {
+            5 => WsValue::Int(value.as_i64().unwrap()),
+            7 => WsValue::Double(value.as_f64().unwrap()),
+            8 | 10 => WsValue::Text(value.as_str().unwrap().to_owned()),
+            other => panic!("夹具登记未覆盖的列类型码 {other}"),
+        }
+    }
+
+    /// 解码行与登记 `expected_rows` 逐格核对。
+    fn assert_rows_match(decoded: &DecodedBlock, json: &serde_json::Value, types: &[u8]) {
+        let expected = json["expected_rows"].as_array().unwrap();
+        assert_eq!(decoded.rows.len(), expected.len(), "行数与登记不符");
+        for (row_index, (row, expected_row)) in decoded.rows.iter().zip(expected).enumerate() {
+            let values: Vec<WsValue> = expected_row
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(types)
+                .map(|(value, kind)| expected_ws_value(*kind, value))
+                .collect();
+            assert_eq!(row, &values, "第 {} 行与登记不符", row_index + 1);
+        }
+    }
+
     fn real_fixture() -> Vec<u8> {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/fetch-block-20261012.bin"
-        );
-        std::fs::read(path).expect("读取真实 fetch_block 夹具")
+        fixture_frame("fetch-block-20261012.bin")
     }
 
     /// 真实块回归：137 字节帧 = 16 字节头 + 121 字节块，块末 1 字节 0x00 尾部。
@@ -563,6 +614,60 @@ mod tests {
         assert_eq!(row[2], WsValue::Int(expected[2].as_i64().unwrap()));
         assert_eq!(row[3], WsValue::Double(expected[3].as_f64().unwrap()));
         assert_eq!(row[4], WsValue::Text(expected[4].as_str().unwrap().into()));
+    }
+
+    /// 真实多行块回归（009 §4.3）：10 行使 null 位图跨 2 字节、变长列有 10 个 offsets，
+    /// 偶数行 NCHAR 为 NULL——这三点都是单行夹具覆盖不到的分支。
+    #[test]
+    fn real_multiline_fixture_matches_registered_json() {
+        let json = fixture_json("rows-multiline-20261012.json");
+        assert_eq!(json["_synthetic"], serde_json::Value::Bool(false));
+        assert_eq!(json["raw_block"]["trailing_bytes_hex"], "00");
+        let types = fixture_types(&json);
+        assert_eq!(types, vec![5, 8, 7, 10]);
+
+        let frame = fixture_frame("rows-multiline-20261012.bin");
+        assert_eq!(frame.len(), 465);
+        assert_eq!(u64::from_le_bytes(frame[8..16].try_into().unwrap()), 1);
+        let block = &frame[16..];
+        assert_eq!(block.len(), 449);
+        assert_eq!(block.last(), Some(&0x00), "尾字节必须存在（不得删改夹具）");
+
+        let decoded = decode(block, &types).expect("真实多行块（含尾字节）必须解码成功");
+        assert_eq!(decoded.col_lengths, vec![80, 90, 80, 50]);
+        assert_eq!(
+            decoded.rows.len(),
+            10,
+            "多行夹具须为 10 行，否则本回归无覆盖意义"
+        );
+        assert_rows_match(&decoded, &json, &types);
+    }
+
+    /// 真实 NCHAR 块回归（009 §4.3）：UCS-4 三例，字节长 8 / 20 / 0。
+    /// 第三列是空串——长度前缀 0 但 offset 有效，须解为 `Text("")` 而非 NULL。
+    #[test]
+    fn real_nchar_fixture_matches_registered_json() {
+        let json = fixture_json("rows-nchar-20261012.json");
+        assert_eq!(json["_synthetic"], serde_json::Value::Bool(false));
+        assert_eq!(json["raw_block"]["trailing_bytes_hex"], "00");
+        let types = fixture_types(&json);
+        assert_eq!(types, vec![10, 10, 10]);
+
+        let frame = fixture_frame("rows-nchar-20261012.bin");
+        assert_eq!(frame.len(), 118);
+        assert_eq!(u64::from_le_bytes(frame[8..16].try_into().unwrap()), 1);
+        let block = &frame[16..];
+        assert_eq!(block.len(), 102);
+        assert_eq!(block.last(), Some(&0x00), "尾字节必须存在（不得删改夹具）");
+
+        let decoded = decode(block, &types).expect("真实 NCHAR 块（含尾字节）必须解码成功");
+        assert_eq!(decoded.col_lengths, vec![10, 22, 2]);
+        assert_eq!(
+            decoded.rows[0][2],
+            WsValue::Text(String::new()),
+            "空 NCHAR 是空串，不是 NULL"
+        );
+        assert_rows_match(&decoded, &json, &types);
     }
 
     /// 合成：列后多出若干尾字节（length 计入）仍解码成功。

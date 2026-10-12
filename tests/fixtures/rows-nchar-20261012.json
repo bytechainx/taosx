@@ -1,0 +1,46 @@
+{
+  "_synthetic": false,
+  "_note": "真实服务端 fetch_block 二进制帧原样字节（2026-10-12，Owner 授权的本机只读探测）。不得删改尾字节；由此派生的畸形样本须另标 _synthetic: true。",
+  "source": {
+    "endpoint": "ws://127.0.0.1:6041/rest/ws",
+    "server_version": "3.3.6.0",
+    "sql": "select cast('中文' as nchar(16)), cast('A中B文C' as nchar(16)), cast('' as nchar(16)) from (select 1) limit 1",
+    "captured_at_utc": "2026-10-12T08:00:00Z"
+  },
+  "binary": {
+    "file": "rows-nchar-20261012.bin",
+    "bytes": 118,
+    "sha256": "56bc0dea1e88bb2047e0f2188f830b737c45e5149f2db0bd661e34a12bae52b6"
+  },
+  "query": {
+    "fields_count": 3,
+    "fields_names": ["cast('中文' as nchar(16))", "cast('A中B文C' as nchar(16))", "cast('' as nchar(16))"],
+    "fields_types": [10, 10, 10],
+    "precision": 0
+  },
+  "fetch": {
+    "rows": 1,
+    "lengths": [10, 22, 2],
+    "completed": false
+  },
+  "frame_header": {
+    "timing_ns": 12337,
+    "id": 1
+  },
+  "raw_block": {
+    "offset_in_frame": 16,
+    "version": 1,
+    "length": 102,
+    "nrows": 1,
+    "ncols": 3,
+    "flag": 2147483648,
+    "group_id": 0,
+    "col_info": [[10, 10], [10, 22], [10, 2]],
+    "col_lengths": [10, 22, 2],
+    "columns_end_offset": 101,
+    "trailing_bytes_hex": "00",
+    "_trailing_note": "列解析结束于块内偏移 101，块长 102，剩 1 字节 0x00；与 fetch-block-20261012 同形。col_lengths 只计数据段（含每个变长值的 u16 长度前缀），不含 offsets：本块 28 头 + 3×5 列信息 + 3×4 列长 + 3×(4+数据) = 101。"
+  },
+  "expected_rows": [["中文", "A中B文C", ""]],
+  "_expected_note": "三列均为 NCHAR(10)，内容为 UCS-4：字节长 8、20、0（均为 4 的倍数）。第三列为空串，长度前缀 0，offset 有效（非 -1），须解为 Text(\"\") 而非 Null。"
+}
