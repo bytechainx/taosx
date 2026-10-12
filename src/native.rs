@@ -1,23 +1,15 @@
-//! TDengine 原生 WebSocket 传输（`/rest/ws`）：握手探测与短会话 SQL。
+//! TDengine 原生 WebSocket 传输（`/rest/ws`）：握手探测与完整结果短会话。
 //!
-//! 与 REST 相比，WebSocket 走同端口（默认 6041）的长连接通道，适合需要频繁小
-//! 请求的场景。`/rest/ws` 是**两步协议**：先 `{"action":"conn",…}` 建会话（服务端
-//! 回 `code == 0` 才接受后续请求），再发 `{"action":"query",…}`。本模块只实现
-//! 「有 deadline 的短会话」：`conn` → `query` → 读元数据帧 → 关闭；不维持连接池，
-//! 因此不引入额外的连接状态机。
-//!
-//! **阶段 1 边界**（[`exec_sql_ws`]）：只完成 `conn` 握手、`query` 元数据响应帧与状态码
-//! 错误映射，返回值不含结果行。
-//!
-//! **阶段 2**（特性 009，[`exec_sql_ws_rows`]）：同一连接上 `fetch` → `fetch_block` 循环
-//! 直到 `completed:true`，按 raw block V3 解码出全部行；`fetch_block` 二进制帧走独立字节
-//! 通道，不经 `frame_payload`。仍为单连接同步短会话，不含连接池或跨连接并发；不支持
-//! TDengine 2.x V2 块格式，DECIMAL / BLOB 等未确认布局的类型明确返回不支持。
+//! 原 String 入口与类型化入口复用同一次 `conn` → `query` → `fetch` / `fetch_block`
+//! 读取链，直到 `completed:true`；二进制块直接解码，不经过 UTF-8 通道。
+//! 原入口保留 query 的字段及未知元数据，以本地 JSON `data` 数组返回全部行；
+//! 输出编码字节与整体 deadline 均受配置约束，不把本地表示当作 wire 协议字段。
+//! 仍为单连接短会话，不含连接池或跨连接并发；不支持 V2 块格式及未确认的类型布局。
 //!
 //! - `raw_block`：V3 块解码与结果值类型；
-//! - `rows`：结果集会话状态机（`req_id` 配对、`id` 路由、`free_result` 语义）。
+//! - `rows`：结果集会话、路由、释放语义与私有有界 JSON 输出。
 
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -106,77 +98,40 @@ fn ws_config_from(config: &TaosConfig) -> WebSocketConfig {
     ws_config
 }
 
-/// 短会话 WS SQL：连接 `/rest/ws`，先 `conn` 建会话，再发 `query`，返回其响应帧。
+/// 短会话 WS SQL：同一次查询读取全部行，保留原 query 元数据并返回本地 JSON。
 ///
-/// 协议（阶段 1 的两步）：
+/// `data` 是按列顺序排列的行数组，不是服务端 wire 字段承诺；整数保持精确值，
+/// 时间戳保持原整数并保留 query 的 `precision`，原始字节表示为字节值数组。
+/// 非查询语句不 fetch，保留更新元数据并返回空 `data`；未知元数据不丢弃。
 ///
-/// 1. 发 `{"action":"conn","args":{"user":…,"password":…}}`——用户名/口令取自
-///    [`TaosConfig`]，**不入日志与错误消息**；
-/// 2. 读 `conn` 响应帧，`code` 必须为 `0`；
-/// 3. 发 `{"action":"query","args":{"sql":…}}`；
-/// 4. 读 `query` 响应帧，`code` 必须为 `0`，其内容（字段元数据等）即返回值。
-///
-/// **判据：只有「明确读到整数 `code == 0`」才算成功**，其余一律 fail-closed 为
-/// [`TaosError::Unavailable`]，包括：帧既非 `Text` 也非 `Binary`、帧不是合法 JSON、
-/// JSON 合法但缺 `code` 字段、`code` 存在但不是整数、`code` 非 `0`。空 SQL 返回
-/// [`TaosError::Invalid`]；整体受 `config.timeout` 约束，超时返回 [`TaosError::Timeout`]。
-///
-/// 服务端结构化 `message` 文本不入错误消息（与 REST 路径同一口径：只保留错误码，
-/// 避免第三方文本或凭据随日志外泄）。
-///
-/// WS 帧/消息大小上限与 `config.max_response_bytes` 联动（见 [`ws_config_from`]），
-/// 与 REST 路径的响应限额策略一致；超限帧由底层直接报错而非静默截断。
-///
-/// **边界**：返回值是 `query` 的**元数据响应帧**，**不含结果行**；需要结果行请用
-/// [`exec_sql_ws_rows`]。协议细节随服务端版本而异。
+/// 复用类型化读取链的 req_id、句柄、释放、行数和块预算规则；整体 timeout 包括
+/// 同步 JSON 转换，成功计数仅在转换完成且未超时后记录一次。
+/// 最终编码字节（含元数据、转义和字节数组）不得超过 `max_response_bytes`。
+/// 非有限浮点数返回序列化错误；空 SQL、协议错误与超时保持具名拒绝。
+/// 服务端 message 与凭据不入错误消息。
 pub async fn exec_sql_ws(config: &TaosConfig, sql: &str) -> TaosResult<String> {
     config.validate()?;
     if sql.trim().is_empty() {
         return Err(TaosError::Invalid("exec_sql_ws: 空 SQL".to_owned()));
     }
+    let deadline = std::time::Instant::now()
+        .checked_add(config.timeout)
+        .ok_or_else(|| TaosError::Invalid("ws sql deadline 超出范围".to_owned()))?;
     let url = build_native_ws_url(config);
     let ws_config = ws_config_from(config);
     let attempt = async {
         let (mut socket, _response) = connect_async_with_config(&url, Some(ws_config), false)
             .await
             .map_err(|error| TaosError::Unavailable(format!("ws 连接失败: {error}")))?;
-
-        // 第 1 步：`conn` 会话握手。未握手时服务端对所有请求回 code=65535
-        // （"server not connected"），故必须先建会话再查询。
-        let conn_payload = serde_json::json!({
-            "action": "conn",
-            "args": { "user": config.user, "password": config.password },
-        })
-        .to_string();
-        socket
-            .send(Message::Text(conn_payload.into()))
-            .await
-            .map_err(|error| TaosError::Unavailable(format!("ws 发送 conn 失败: {error}")))?;
-        let conn_frame = frame_payload(read_frame(&mut socket).await?)?;
-        ensure_code_zero(&conn_frame, "conn")?;
-
-        // 第 2 步：`query`。响应帧含字段元数据（`fields_names` / `fields_types` / …），
-        // 但不含结果行——结果行需另发 `fetch`（见 `exec_sql_ws_rows`）。
-        let query_payload = serde_json::json!({
-            "action": "query",
-            "args": { "sql": sql },
-        })
-        .to_string();
-        socket
-            .send(Message::Text(query_payload.into()))
-            .await
-            .map_err(|error| TaosError::Unavailable(format!("ws 发送 query 失败: {error}")))?;
-        let query_frame = frame_payload(read_frame(&mut socket).await?)?;
-        ensure_code_zero(&query_frame, "query")?;
-
+        let result = rows::read_result_set(&mut socket, config, sql).await;
         if let Err(error) = socket.close(None).await {
-            debug!(target: "taosx", %error, "ws 关闭失败（响应已获取，不影响正确性）");
+            debug!(target: "taosx", %error, "ws 关闭失败（不覆盖读取结果）");
         }
-        Ok(query_frame)
+        let (metadata, result) = result?;
+        rows::encode_result_json(&metadata, &result, config.max_response_bytes, deadline)
     };
     match tokio::time::timeout(config.timeout, attempt).await {
         Ok(result) => {
-            // 同 `connect_native_ws`：`is_ok()` 用于「统计成功个数」的指标累加。
             crate::metrics::record_ws_probe(result.is_ok());
             result
         }
@@ -552,6 +507,34 @@ mod tests {
         let error = read_frame(&mut failed).await.expect_err("读错误必须拒绝");
         assert!(matches!(error, TaosError::Unavailable(_)));
         assert!(error.to_string().contains("ws 读失败"));
+    }
+
+    #[test]
+    fn original_json_output_keeps_unknown_large_exponent() {
+        let metadata: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"extra":1e400}"#).expect("未知大指数 JSON 数值");
+        let result = WsQueryResult {
+            fields_names: Vec::new(),
+            fields_types: Vec::new(),
+            precision: crate::TsPrecision::Ns,
+            rows: Vec::new(),
+        };
+        let output = rows::encode_result_json(
+            &metadata,
+            &result,
+            1024,
+            std::time::Instant::now() + Duration::from_secs(5),
+        )
+        .expect("保留数值原值");
+        let decoded: serde_json::Value = serde_json::from_str(&output).expect("输出 JSON");
+        let mut expected: serde_json::Value =
+            serde_json::from_str(r#"{"extra":1e400}"#).expect("独立预期数值");
+        expected["data"] = serde_json::Value::Array(Vec::new());
+        assert_eq!(decoded, expected);
+        assert!(decoded["extra"].is_number());
+        assert!(!decoded["extra"].is_string());
+        assert_eq!(decoded["extra"], metadata["extra"]);
+        assert_eq!(decoded["data"], serde_json::Value::Array(Vec::new()));
     }
 
     #[test]

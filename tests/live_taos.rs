@@ -107,6 +107,18 @@ fn assert_ws_query_metadata(frame: &str, expected_columns: usize) {
         field_names.len(),
         "fields_types 必须与 fields_names 等长"
     );
+    let data = metadata["data"]
+        .as_array()
+        .expect("原入口必须返回 data 数组");
+    assert_eq!(data.len(), 1, "SERVER_VERSION 必须返回一行");
+    let row = data[0].as_array().expect("每行必须是数组");
+    assert_eq!(row.len(), expected_columns);
+    assert!(
+        row[0]
+            .as_str()
+            .is_some_and(|version| !version.trim().is_empty()),
+        "SERVER_VERSION 必须返回非空版本字符串"
+    );
 }
 
 /// 探活 + 结构化健康断言。

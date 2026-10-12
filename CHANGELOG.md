@@ -8,11 +8,28 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-12
+
+本版本为 MAJOR 候选，原 String 入口的可观察结果契约改变；不代表发布或生产接受。
+
+### 变更
+
+- **破坏性变更**：`exec_sql_ws` 与池同名入口保持 `TaosResult<String>` 签名，但由只回 query 元数据改为
+  同一次 query 读取全部行：保留元数据值与未知字段，以本地 `data` 行数组替换该字段。
+  不承诺原字符串逐字保留或服务端 wire 含 `data`；typed 入口行为不变。
+- **破坏性变更**：原 String 入口的 DDL 不 fetch，保留更新元数据且 `data` 为 `[]`；Bytes 为字节值数组，Timestamp 保留
+  原整数与元数据 precision，整数不经浮点转换，NaN / Inf 行值返回 `Serialization`。
+- **破坏性变更**：原 String 入口最终 JSON 的实际编码字节（含元数据、转义与 Bytes 数组）受 `max_response_bytes` 约束，
+  超限返回 `Unavailable` 而非截断；同步转换与末尾检查受 timeout 约束，过期返回 `Timeout`。
+  成功计数仅在最终转换成功后增加一次。
+- 现有 `serde_json` 依赖启用 `arbitrary_precision`，保留未知元数据中的大整数及
+  `1e400` 等 JSON 数值原值，不舍入或字符串化；不新增依赖。
+
 ### 新增
 
 - 特性 009：新增 `exec_sql_ws_rows(&config, sql)` 与 `TaosPool::exec_sql_ws_rows(sql)`，在单条 WS 短会话上
   `conn` → `query` → `fetch` / `fetch_block` 直到 `completed:true`，返回完整结果集 `WsQueryResult`
-  （列名、类型码、精度、`WsValue` 行值）。`exec_sql_ws` 签名与语义不变。
+  （列名、类型码、精度、`WsValue` 行值）。typed 入口行为不变；String 入口变更见上文。
   - 所有请求带客户端 `req_id` 并校验回显；`fetch_block` Binary 帧按头内结果集 `id` 路由，走独立字节通道；
     Text JSON 错误帧按错误处理。
   - `completed:true` / `fetch` 出错不再发 `free_result`；其余中途放弃发 `free_result` 且不等待。
@@ -25,7 +42,7 @@
 
 - `exec_sql_ws` 的 conn / query 响应若为非法 UTF-8 的 Binary 帧，原先经有损解码后可能被当作成功；现一律返回
   `TaosError::Unavailable`。读取层保留数据帧的 Text / Binary 类型与原始字节，为后续
-  `fetch_block` 二进制通道铺路（特性 009 T5 前置，未实现 fetch / fetch_block / 解码）。
+  `fetch_block` 二进制通道铺路（该 T5 前置交付时点尚未实现 fetch / fetch_block / 解码；本候选已复用完整读取链）。
 
 ### 破坏性变更
 

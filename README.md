@@ -9,6 +9,8 @@ TDengine（涛思）异步客户端。REST 为主传输，原生 WebSocket 为�
 - 硬上限 fail-closed：并发、批量行数/字节、响应体、查询行数、关闭 deadline 全部有上限常量
 - 写路径安全：标识符白名单校验 + tag 值十六进制子表编码 + 字面量转义
 
+当前 `1.0.0` 为 MAJOR 候选：原 String 入口的可观察结果契约改变，不代表发布或生产接受。
+
 ## 安装
 
 本 crate **不发布到 crates.io**，通过 git 依赖引入：
@@ -86,21 +88,29 @@ Basic 认证；请求/响应体大小都受 `batch_max_bytes` / `max_response_by
 | `build_native_ws_url(&config)` | 纯函数，构造 `ws(s)://host:port/rest/ws` |
 | `validate_mode(&config)` | 校验配置 + 传输模式一致性 |
 | `connect_native_ws(&config)` | 有 deadline 的握手探测，成功即关闭 |
-| `exec_sql_ws(&config, sql)` | 短会话两步协议：`conn` 建会话 → `query` → 读元数据帧 → 关闭 |
+| `exec_sql_ws(&config, sql)` | 同一次 query 读取全部行，返回保留元数据值并含 `data` 行数组的本地 JSON String |
 | `exec_sql_ws_rows(&config, sql)` | 完整结果读取：`conn` → `query` → `fetch` / `fetch_block` 直到 `completed:true`，返回 `WsQueryResult`（列名、类型码、精度、行值） |
 | `probe_native_tcp(&config, port)` | 原生 SQL 端口（默认 6030）可达性探测，不发协议帧 |
 
 `TaosPool::new` **不发网**（`validate` + 装配 HTTP 客户端；若配置了 `tls_ca_file` 会同步读 PEM）。`TaosPool::connect` **会发网**：`NativeWs` 先做
 WS 握手探测；`database` 非空时经 REST 建库并探测精度；两种模式最后都 `ping`。SQL 数据面
-仍默认走 REST（可用 `TaosPool::exec_sql_ws` 显式走 WS）。`/rest/ws` 是**两步协议**：
-`exec_sql_ws` 先发 `{"action":"conn","args":{"user":…,"password":…}}` 建会话，读到
-`code == 0` 后再发 `{"action":"query","args":{"sql":…}}`，返回 `query` 的**元数据响应帧**。
-**只有「明确读到整数 `code == 0`」才算成功**：非 0 `code`、非 JSON 帧、缺 `code` 字段、
-`code` 非整数、以及既非 `Text` 也非 `Binary` 的帧（`Ping`/`Pong`/`Close`）一律
-fail-closed 为 `TaosError::Unavailable`；凭据与服务端 `message` 文本均不入日志与错误消息。
+仍默认走 REST（可用 `TaosPool::exec_sql_ws` 显式走 WS）。两个 WS SQL 入口在
+单条短会话上执行 `conn` → `query` → `fetch` / `fetch_block`，直到 `completed:true`。
+协议异常、非整数或非 0 `code`、响应不配对返回 `TaosError::Unavailable`；
+凭据与服务端 `message` 文本不入日志与错误消息。
 
-> **阶段 1 边界**：`exec_sql_ws` 只完成 `conn` 握手 + `query` 元数据帧 + 状态码错误映射，
-> 返回值**不含结果行**。完整结果读取用 `exec_sql_ws_rows`（特性 009）：单连接同步读取，
+String 签名保持 `TaosResult<String>`，但由仅元数据改为完整结果：保留同一次 query 的元数据值
+（包括未知字段），以本地 `data` 行数组替换该字段。不承诺原响应字符串逐字保留，
+也不把本地 `data` 当作 wire 协议字段。DDL 的更新结果不 fetch，保留元数据且 `data` 为 `[]`。
+
+整数不经浮点转换；Timestamp 输出原整数，精度仍由 query 元数据 `precision` 表示；
+Bytes 输出字节值数组，bool / text / null 对应 JSON 值。未知元数据数值启用
+`serde_json` 的 `arbitrary_precision` 保留原值，不舍入或字符串化。行值中的 NaN / Inf 返回
+`TaosError::Serialization`。最终 JSON 的实际编码字节（含元数据、转义与 Bytes 数组）另受
+`max_response_bytes` 约束，超限返回 `Unavailable`，不截断。整体 `timeout` 覆盖同步转换，
+每次写入与最终完成检查期限，过期返回 `Timeout`；成功计数仅在最终转换成功后增加一次。
+typed 入口的结果行为不变。
+
 > raw block 只支持 TDengine 3.x V3 格式（`version=1`、`flag=0x80000000`，实测值），
 > DECIMAL / DECIMAL64 / BLOB / MEDIUMBLOB 明确返回 `TaosError::Unsupported`。
 
