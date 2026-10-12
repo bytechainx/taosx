@@ -8,7 +8,8 @@
 //! - **REST（默认）**：`reqwest` → `POST http(s)://host:port/rest/sql[/database]`，
 //!   默认端口 6041，Basic 认证。覆盖面最广，是数据读写的主路径。
 //! - **Native WebSocket**：`tokio-tungstenite` → `ws(s)://host:port/rest/ws`，
-//!   由 [`connect_native_ws`] 做握手探测、[`exec_sql_ws`] 执行短会话 SQL、
+//!   由 [`connect_native_ws`] 做握手探测、[`exec_sql_ws`] 执行短会话 SQL（只回元数据帧）、
+//!   [`exec_sql_ws_rows`] 读取完整结果集、
 //!   [`probe_native_tcp`] 探测原生端口。`TransportMode::NativeWs` 时
 //!   [`TaosPool::connect`] 会先完成一次 WS 握手探测；之后建库 / `exec` / `query`
 //!   仍走 REST。[`TaosPool::new`] 只校验配置，不发网。
@@ -64,7 +65,7 @@
 //! - 可靠性： [`RetryPolicy`]
 //! - 观测： [`TaosMetricsSnapshot`]、[`ws_probe_totals`]
 //! - 原生 WS： [`build_native_ws_url`]、[`connect_native_ws`]、[`exec_sql_ws`]、
-//!   [`probe_native_tcp`]、[`validate_mode`]
+//!   [`exec_sql_ws_rows`]、[`WsQueryResult`]、[`WsValue`]、[`probe_native_tcp`]、[`validate_mode`]
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -99,7 +100,8 @@ pub use config::{
 pub use error::{TaosError, TaosResult};
 pub use metrics::{ws_probe_totals, TaosMetricsSnapshot};
 pub use native::{
-    build_native_ws_url, connect_native_ws, exec_sql_ws, probe_native_tcp, validate_mode,
+    build_native_ws_url, connect_native_ws, exec_sql_ws, exec_sql_ws_rows, probe_native_tcp,
+    validate_mode, WsQueryResult, WsValue,
 };
 pub use point::TaosPoint;
 pub use retry::RetryPolicy;
