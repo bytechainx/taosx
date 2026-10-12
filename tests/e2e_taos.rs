@@ -1852,6 +1852,44 @@ async fn phase_rest_transport(configs: &E2EConfigs, registry: &ResourceRegistry)
     assert!(pool.ping().await.is_err(), "close 后必须拒绝新请求");
 }
 
+/// 解析 `exec_sql_ws` 返回的 `query` 元数据帧并断言其结构。
+///
+/// 为什么不再只断言「非空首帧」：非空文本无法证明拿到的是 `query` 元数据
+/// （而非错误帧或其它帧）；这里在真实服务上复核 `code == 0`、`fields_names`
+/// 列数符合预期且逐项为非空字符串、`fields_types` 与之等长，使 E2E 断言与
+/// mock 合同测试（`ws_conn_handshake.rs`）对齐到同一结构。
+fn assert_ws_query_metadata(frame: &str, expected_columns: usize) {
+    let metadata: serde_json::Value = serde_json::from_str(frame)
+        .unwrap_or_else(|error| panic!("WS query 元数据帧必须是合法 JSON：{error}"));
+    assert_eq!(
+        metadata["code"].as_i64(),
+        Some(0),
+        "WS query 元数据帧 code 必须为 0"
+    );
+    let field_names = metadata["fields_names"]
+        .as_array()
+        .expect("WS query 元数据帧必须含 fields_names 数组");
+    assert!(
+        !field_names.is_empty() && field_names.len() == expected_columns,
+        "fields_names 列数必须为 {expected_columns}，实际 {}",
+        field_names.len()
+    );
+    assert!(
+        field_names
+            .iter()
+            .all(|name| name.as_str().is_some_and(|name| !name.trim().is_empty())),
+        "fields_names 每项必须是非空字符串"
+    );
+    let field_types = metadata["fields_types"]
+        .as_array()
+        .expect("WS query 元数据帧必须含 fields_types 数组");
+    assert_eq!(
+        field_types.len(),
+        field_names.len(),
+        "fields_types 必须与 fields_names 等长"
+    );
+}
+
 /// 阶段 7：原生传输（`probe_native_tcp` + WS 握手 + `/rest/ws` 短会话 + 数据面）。
 async fn phase_native_transport(configs: &E2EConfigs, registry: &ResourceRegistry) {
     // 原生 TCP 端口可达性（env 事实端口；不发送协议帧）。
@@ -1896,18 +1934,19 @@ async fn phase_native_transport(configs: &E2EConfigs, registry: &ResourceRegistr
         TsPrecision::Ms | TsPrecision::Us | TsPrecision::Ns
     ));
 
-    // WS 短会话：池方法与自由函数各一次，均要求真的收到服务端首帧。
+    // WS 短会话：池方法与自由函数各一次，均要求返回 `query` 元数据帧
+    // （`SELECT SERVER_VERSION()` 恰一列）。
     hit("fn", "TaosPool::exec_sql_ws");
     let frame = pool
         .exec_sql_ws("SELECT SERVER_VERSION()")
         .await
-        .expect("WS 短会话必须收到服务端首帧");
-    assert!(!frame.trim().is_empty(), "WS 首帧不得为空");
+        .expect("WS 短会话必须收到 query 元数据帧");
+    assert_ws_query_metadata(&frame, 1);
     hit("fn", "exec_sql_ws");
     let free_frame = exec_sql_ws(&configs.native, "SELECT SERVER_VERSION()")
         .await
-        .expect("自由函数 WS 会话必须收到首帧");
-    assert!(!free_frame.trim().is_empty(), "WS 首帧不得为空");
+        .expect("自由函数 WS 会话必须收到 query 元数据帧");
+    assert_ws_query_metadata(&free_frame, 1);
     assert!(exec_sql_ws(&configs.native, "   ").await.is_err());
 
     hit("fn", "ws_probe_totals");
