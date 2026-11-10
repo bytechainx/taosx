@@ -61,6 +61,138 @@ impl TsPrecision {
             Self::Ms => timestamp.saturating_mul(1_000_000),
         }
     }
+
+    /// 每单位纳秒数。
+    #[must_use]
+    pub const fn nanos_per_unit(self) -> i64 {
+        match self {
+            Self::Ns => 1,
+            Self::Us => 1_000,
+            Self::Ms => 1_000_000,
+        }
+    }
+}
+
+/// 原生闭区间网格换算结果。
+///
+/// 对应 `specs/repos/type/temporal/spec.md` §30.2：目标 `[s, e)` 映射为
+/// 包含式原生网格端点 `native_start = ceil_div(s, δ)`、
+/// `native_end = ceil_div(e, δ) - 1`。`native_end < native_start` 表示该网格
+/// 没有命中点，调用方应返回空请求结果，不得发出起止颠倒的请求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridWindow {
+    /// 包含式原生起点网格序号。
+    pub native_start: i64,
+    /// 包含式原生终点网格序号。
+    pub native_end: i64,
+}
+
+impl GridWindow {
+    /// 该网格是否没有命中点。
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.native_end < self.native_start
+    }
+}
+
+/// 计算 `ceil(a / δ)`，`δ > 0`。
+///
+/// 使用欧几里得除法，对负值同样正确（Rust `/` 向零截断）；不溢出。
+fn ceil_div(a: i64, delta: i64) -> i64 {
+    let quotient = a.div_euclid(delta);
+    if a.rem_euclid(delta) == 0 {
+        quotient
+    } else {
+        quotient + 1
+    }
+}
+
+/// 把目标半开纳秒区间 `[start, end)` 映射为包含式原生网格端点。
+///
+/// `delta` 为原生网格步长（纳秒），必须为正。返回 `None` 表示参数非法
+/// （`delta <= 0` 或 `end <= start`）。运算全程用宽整数，不溢出。
+#[must_use]
+pub fn to_native_grid(start: i64, end: i64, delta: i64) -> Option<GridWindow> {
+    if delta <= 0 || end <= start {
+        return None;
+    }
+    let native_start = ceil_div(start, delta);
+    let native_end = ceil_div(end, delta) - 1;
+    Some(GridWindow {
+        native_start,
+        native_end,
+    })
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::{ceil_div, to_native_grid, TsPrecision};
+
+    #[test]
+    fn ceil_div_is_exact_for_aligned_values() {
+        let delta = TsPrecision::Ms.nanos_per_unit();
+        assert_eq!(ceil_div(0, delta), 0);
+        assert_eq!(ceil_div(1_500_000_000, delta), 1_500);
+        assert_eq!(ceil_div(-1_500_000_000, delta), -1_500);
+    }
+
+    #[test]
+    fn ceil_div_rounds_toward_positive_infinity() {
+        let delta = TsPrecision::Ms.nanos_per_unit();
+        assert_eq!(ceil_div(1_500_000_001, delta), 1_501);
+        assert_eq!(ceil_div(-1_500_000_001, delta), -1_500);
+    }
+
+    #[test]
+    fn ceil_div_handles_extremes_without_overflow() {
+        let delta = TsPrecision::Ms.nanos_per_unit();
+        assert_eq!(ceil_div(i64::MAX, delta), i64::MAX.div_euclid(delta) + 1);
+        assert_eq!(ceil_div(i64::MIN, delta), i64::MIN.div_euclid(delta) + 1);
+    }
+
+    #[test]
+    fn grid_window_maps_half_open_to_inclusive() {
+        let delta = TsPrecision::Ms.nanos_per_unit();
+        // [0, 1ms) → 网格点 0。
+        let window = to_native_grid(0, delta, delta).expect("合法区间");
+        assert_eq!(window.native_start, 0);
+        assert_eq!(window.native_end, 0);
+        assert!(!window.is_empty());
+        // [1ms, 3ms) → 网格点 1..=2。
+        let window = to_native_grid(delta, 3 * delta, delta).expect("合法区间");
+        assert_eq!(window.native_start, 1);
+        assert_eq!(window.native_end, 2);
+        // 非整起点向上取整：[1, 2ms) → 1..=1。
+        let window = to_native_grid(1, 2 * delta, delta).expect("合法区间");
+        assert_eq!(window.native_start, 1);
+        assert_eq!(window.native_end, 1);
+    }
+
+    #[test]
+    fn grid_window_reports_empty_when_no_point_fits() {
+        let delta = TsPrecision::Ms.nanos_per_unit();
+        // 区间长度小于一个网格步长且不跨网格点 → 无命中点。
+        let window = to_native_grid(1, 2, delta).expect("合法区间");
+        assert!(window.is_empty());
+        assert!(window.native_end < window.native_start);
+    }
+
+    #[test]
+    fn grid_window_handles_negative_ranges() {
+        let delta = TsPrecision::Ms.nanos_per_unit();
+        let window = to_native_grid(-2 * delta, -delta, delta).expect("合法区间");
+        assert_eq!(window.native_start, -2);
+        assert_eq!(window.native_end, -2);
+        assert!(!window.is_empty());
+    }
+
+    #[test]
+    fn grid_window_rejects_invalid_arguments() {
+        assert!(to_native_grid(0, 1, 0).is_none(), "δ 必须为正");
+        assert!(to_native_grid(0, 1, -1).is_none(), "δ 必须为正");
+        assert!(to_native_grid(1, 1, 1).is_none(), "空区间拒绝");
+        assert!(to_native_grid(2, 1, 1).is_none(), "起止颠倒拒绝");
+    }
 }
 
 /// 传输模式：REST（默认）或原生 WebSocket。

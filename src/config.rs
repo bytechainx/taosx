@@ -25,7 +25,7 @@ mod enums;
 mod parse;
 
 pub use builder::TaosConfigBuilder;
-pub use enums::{TransportMode, TsPrecision};
+pub use enums::{to_native_grid, GridWindow, TransportMode, TsPrecision};
 
 use self::parse::{
     de_millis, de_optional_precision, de_transport, env_bool, env_non_empty, env_parsed,
