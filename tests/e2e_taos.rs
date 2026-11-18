@@ -47,13 +47,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures_util::{FutureExt as _, StreamExt};
 use taosx::{
     build_insert_sql_chunks, build_native_ws_url, connect_native_ws, exec_sql_ws, exec_sql_ws_rows,
-    probe_native_tcp, validate_mode, ws_probe_totals, BatchWritePartialError, BatchWriteReport,
-    BatcherCloseError, BatcherCloseReport, RetryPolicy, TaosClient, TaosConfig, TaosConfigBuilder,
-    TaosError, TaosExecResult, TaosHealth, TaosMetricsSnapshot, TaosPoint, TaosPool, TaosPoolStats,
-    TaosQueryStream, TaosResult, TransportMode, TsPrecision, WriteBatcher, WriteBatcherConfig,
-    WsQueryResult, WsValue, DEFAULT_DATABASE, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_USER,
-    ENV_ACQUIRE_TIMEOUT_MS, ENV_BATCH_MAX_BYTES, ENV_BATCH_MAX_ROWS, ENV_CLOSE_TIMEOUT_MS,
-    ENV_DATABASE, ENV_HOST, ENV_HOSTS, ENV_MAX_IN_FLIGHT, ENV_MAX_QUERY_ROWS,
+    probe_native_tcp, to_native_grid, validate_mode, ws_probe_totals, BatchWritePartialError,
+    BatchWriteReport, BatcherCloseError, BatcherCloseReport, GridWindow, RetryPolicy, TaosClient,
+    TaosConfig, TaosConfigBuilder, TaosError, TaosExecResult, TaosHealth, TaosMetricsSnapshot,
+    TaosPoint, TaosPool, TaosPoolStats, TaosQueryStream, TaosResult, TransportMode, TsPrecision,
+    WriteBatcher, WriteBatcherConfig, WsQueryResult, WsValue, DEFAULT_DATABASE, DEFAULT_HOST,
+    DEFAULT_PORT, DEFAULT_USER, ENV_ACQUIRE_TIMEOUT_MS, ENV_BATCH_MAX_BYTES, ENV_BATCH_MAX_ROWS,
+    ENV_CLOSE_TIMEOUT_MS, ENV_DATABASE, ENV_HOST, ENV_HOSTS, ENV_MAX_IN_FLIGHT, ENV_MAX_QUERY_ROWS,
     ENV_MAX_RESPONSE_BYTES, ENV_PASSWORD, ENV_PORT, ENV_PRECISION, ENV_PREFIX, ENV_TIMEOUT_MS,
     ENV_TLS, ENV_TLS_CA_FILE, ENV_TRANSPORT, ENV_USER, ENV_WRITE_MAX_ATTEMPTS,
     HARD_MAX_BATCH_BYTES, HARD_MAX_BATCH_ROWS, HARD_MAX_CLOSE_TIMEOUT, HARD_MAX_IN_FLIGHT,
@@ -112,6 +112,11 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("fn", "TsPrecision::from_nanos"),
     ("fn", "TsPrecision::parse"),
     ("fn", "TsPrecision::to_nanos"),
+    ("fn", "TsPrecision::nanos_per_unit"),
+    ("type", "GridWindow"),
+    ("field", "GridWindow::native_start"),
+    ("field", "GridWindow::native_end"),
+    ("fn", "GridWindow::is_empty"),
     ("type", "BatchWritePartialError"),
     ("field", "BatchWritePartialError::report"),
     ("field", "BatchWritePartialError::source"),
@@ -319,6 +324,7 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("const", "HARD_MAX_TIMEOUT"),
     ("const", "HARD_MAX_WRITE_MAX_ATTEMPTS"),
     ("fn", "build_insert_sql_chunks"),
+    ("fn", "to_native_grid"),
     ("fn", "build_native_ws_url"),
     ("fn", "connect_native_ws"),
     ("fn", "exec_sql_ws"),
@@ -764,6 +770,34 @@ fn phase_value_types() {
     assert_eq!(TsPrecision::Ms.to_nanos(1500), 1_500_000_000);
     assert_eq!(TsPrecision::Us.to_nanos(1500), 1_500_000);
     assert_eq!(TsPrecision::Ns.to_nanos(42), 42);
+
+    // —— 原生闭区间网格换算（TP-T142）：纯函数，无需服务 ——
+    hit("fn", "TsPrecision::nanos_per_unit");
+    assert_eq!(TsPrecision::Ms.nanos_per_unit(), 1_000_000);
+    assert_eq!(TsPrecision::Us.nanos_per_unit(), 1_000);
+    assert_eq!(TsPrecision::Ns.nanos_per_unit(), 1);
+
+    hit("type", "GridWindow");
+    hit("fn", "to_native_grid");
+    let delta = TsPrecision::Ms.nanos_per_unit();
+    // [1ms, 3ms) → 包含式原生网格 1..=2。
+    let window = to_native_grid(delta, 3 * delta, delta).expect("合法区间必须成功");
+    // 穷尽解构（不写 `..`）：新增公开字段会在此处编译失败，强制补齐覆盖。
+    let GridWindow {
+        native_start,
+        native_end,
+    } = window;
+    hit("field", "GridWindow::native_start");
+    assert_eq!(native_start, 1);
+    hit("field", "GridWindow::native_end");
+    assert_eq!(native_end, 2);
+    hit("fn", "GridWindow::is_empty");
+    assert!(!window.is_empty());
+    // 区间不跨网格点 → 空窗口；非法参数 → None。
+    let empty = to_native_grid(1, 2, delta).expect("合法区间必须成功");
+    assert!(empty.is_empty());
+    assert!(to_native_grid(0, 1, 0).is_none(), "δ 必须为正");
+    assert!(to_native_grid(2, 1, 1).is_none(), "起止颠倒拒绝");
 
     // —— RetryPolicy：类型 + 5 字段 + 8 个方法 ——
     hit("type", "RetryPolicy");
